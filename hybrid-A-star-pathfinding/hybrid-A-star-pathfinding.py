@@ -250,7 +250,7 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
     tc = map_grid()
     env = Environment(tc.obs)
-    car = SimpleCar(env, start_pos, end_pos)
+    car = SimpleCar(env, start_pos, end_pos, l=0.2)
     grid = Grid(env)
 
     hastar = HybridAstar(car, grid, reverse)
@@ -410,14 +410,23 @@ class map_grid:
         self.start_pos2 = [4, 4, 0]  # default values
         self.end_pos2 = [4, 8, -pi]  # default
         self.obs = [
-            [0, 6, 6, 0.1],
-            [6, 0, 0.1, 4],
-            [0, 14, 4, 0.1],
-            [6, 14, 0.1, 6],
-            [14, 14, 6, 0.1],
-            [14, 16, 0.1, 4],            
-            [16, 6, 4, 0.1],
-            [14, 0, 0.1, 6],          
+            #x,y,x-bredde,y-høyde
+        
+            [0.0, 0.0,   3.3,  0.05],
+            [3.275, 0.0, 0.05, 0.2],
+            [3.3, 0.175, 1.91, 0.05],
+            [0.0, 2.725, 5.21, 0.05],
+            [0.0, 0.0,   0.05, 1.0],
+            [0.0, 0.975, 0.5,  0.05],
+            [0.475, 1.0, 0.05, 0.2],
+            [0.0, 1.175, 0.5,  0.05],
+            [0.0, 1.2,   0.05, 1.55],
+            [5.185, 0.2, 0.05, 2.55],
+            [1.2, 1.65, 0.2, 0.4],
+            [2.3, 1.65, 0.4, 0.4],
+            [3.66, 1.8, 0.4, 0.2],
+            [1.35, 0.6, 0.5, 0.2],
+            [3.16, 0.8, 0.5, 0.2],
         ]
 
 if __name__ == '__main__':
@@ -428,7 +437,7 @@ if __name__ == '__main__':
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
     args = p.parse_args()
-    start_pos = [2, 2, 0]      # Here defined initial position [x,y,angle]
-    end_pos = [4.5, 4.5, 1*pi/4] # Target point [x,y, angle]
+    start_pos = [0.35, 0.35, 0]      # Here defined initial position [x,y,angle]
+    end_pos = [4.3, 0.7, 0] # Target point [x,y, angle]
     main_hybrid_a(args.heu,start_pos,end_pos,args.r,args.e,args.g)
     print("An optimal path was computed using hybrid A* algorithm")
