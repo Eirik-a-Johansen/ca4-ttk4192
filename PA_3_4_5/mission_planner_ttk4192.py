@@ -8,7 +8,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from math import pi, sqrt, atan2, tan
 from os import system, name
-from time import time
+import time 
 import re
 import fileinput
 import sys
@@ -482,7 +482,8 @@ def taking_photo_exe():
     shutil.move(file_source + g, file_destination)
     rospy.sleep(1)
 
-def move_robot_waypoint0_waypoint1():
+#Think this is good, needs testing
+def move_robot_waypoint0_waypoint1(start_pos=[2, 2, 0], end_pos=[6, 6, 3*pi/4]):
     # This function executes Move Robot from 1 to 2
     # This function uses hybrid A-star
     a=0
@@ -498,13 +499,12 @@ def move_robot_waypoint0_waypoint1():
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
     args = p.parse_args()
-    start_pos = [2, 2, 0]
-    end_pos = [6, 6, 3*pi/4]
     main_hybrid_a(args.heu,start_pos,end_pos,args.r,args.e,args.g)
     print("Executing path following")
     turtlebot_move()
 
 
+#Not done
 def Manipulate_OpenManipulator_x():
     print("Executing manipulate a weight")
     time.sleep(5)
@@ -557,31 +557,39 @@ def making_turn_exe():
     velocity_publisher.publish(vel_msg)
     #rospy.spin()
 
+#There are no Ir-topic as far as I can see, so it should be the same as take photo
 def check_pump_picture_ir_waypoint0():
     a=0
     while a<3:
         print("Taking IR picture at waypoint0 ...")
         time.sleep(1)
         a=a+1
+    taking_photo_exe()
     time.sleep(5)
 
-def check_seals_valve_picture_eo_waypoint0():
+#Think this is good.
+def check_seals_valve_picture_eo(WP):
     a=0
     while a<3:
-        print("Taking EO picture at waypoint0 ...")
+        print(f"Taking EO picture at {WP} ...")
         time.sleep(1)
         a=a+1
+    taking_photo_exe()
     time.sleep(5)
 
-# Charging battery 
+# Charging battery, dont know if we need to subscribe to topics here.
 def charge_battery_waypoint0():
-    print("chargin battert")
+    print("chargin battery")
     time.sleep(5)
+
+
+
+
 
 
 # Define the global varible: WAYPOINTS  Wpts=[[x_i,y_i]];
 global WAYPOINTS
-WAYPOINTS = [[1,1],[2,2]]
+WAYPOINTS = [[0.2,0.2],[1.6,0.6],[3.41,1.0], [3.36, 2.0], [5.15, 0.25], [0.87, 2.56], [3.86, 1.8]]
 
 
 # 5) Program here the main commands of your mission planner code
@@ -589,137 +597,139 @@ WAYPOINTS = [[1,1],[2,2]]
 """
 if __name__ == '__main__':
     try:
-        print()
-        print("************ TTK4192 - Assigment 4 **************************")
-        print()
-        print("AI planners: GraphPlan")
-        print("Path-finding: Hybrid A-star")
-        print("GNC Controller: PID path-following")
-        print("Robot: Turtlebot3 waffle-pi")
-        print("date: 20.03.23")
-        print()
-        print("**************************************************************")
-        print()
-        print("Press Intro to start ...")
-        input_t=input("")
-        # 5.0) Testing the GNC module (uncomment lines to test)
+        # print()
+        # print("************ TTK4192 - Assigment 4 **************************")
+        # print()
+        # print("AI planners: GraphPlan")
+        # print("Path-finding: Hybrid A-star")
+        # print("GNC Controller: PID path-following")
+        # print("Robot: Turtlebot3 waffle-pi")
+        # print("date: 20.03.23")
+        # print()
+        # print("**************************************************************")
+        # print()
+        # print("Press Intro to start ...")
+        # input_t=input("")
+        # # 5.0) Testing the GNC module (uncomment lines to test)
 
-        # aea
-        # aea 2
-        # aea 3
-        # aea 4
+        # # aea
+        # # aea 2
+        # # aea 3
+        # # aea 4
         
 
-		# 5.1) Starting the AI Planner
+		# # 5.1) Starting the AI Planner
        
-        a_plan=1    
-        if a_plan==1:
-           print(" ---Executing Graph planner --- ")
-           time.sleep(1)
-           if len(sys.argv) != 1 and len(sys.argv) != 3:
-                print("Usage: GraphPlan.py domainName problemName")
-                exit()
-            # Here you need to load your PDDL domain
-           dir_p="/home/miguel/catkin_ws/src/assigment4_ttk4192/scripts/ai_planner_modules/PDDL_domain/"
-           domain = dir_p+"dwrDomain_turtlebot.txt"
-           problem = dir_p+"dwrProblem_turtlebot.txt"
-           if len(sys.argv) == 3:
-                domain = str(sys.argv[1])
-                problem = str(sys.argv[2])
-           gp = GraphPlan(domain, problem)
-           start = time.time()
-           plan = gp.graphPlan()
-           elapsed = time.time() - start
-           plan=np.array(plan)
-           l=[]
-            #print([plan.action for action in plan])
-           if plan is not None:
-                print("Plan found with %d actions in %.2f seconds" %
-                    (len([act for act in plan if not act.isNoOp()]), elapsed))            
-                for i in range(len(plan)):
-                    #print(plan[i])
-                    l.append(plan[i])
-           else:
-                print("Could not find a plan in %.2f seconds" % elapsed)
+        # a_plan=1    
+        # if a_plan==1:
+        #    print(" ---Executing Graph planner --- ")
+        #    time.sleep(1)
+        #    if len(sys.argv) != 1 and len(sys.argv) != 3:
+        #         print("Usage: GraphPlan.py domainName problemName")
+        #         exit()
+        #     # Here you need to load your PDDL domain
+        #    dir_p="/home/miguel/catkin_ws/src/assigment4_ttk4192/scripts/ai_planner_modules/PDDL_domain/"
+        #    domain = dir_p+"dwrDomain_turtlebot.txt"
+        #    problem = dir_p+"dwrProblem_turtlebot.txt"
+        #    if len(sys.argv) == 3:
+        #         domain = str(sys.argv[1])
+        #         problem = str(sys.argv[2])
+        #    gp = GraphPlan(domain, problem)
+        #    start = time.time()
+        #    plan = gp.graphPlan()
+        #    elapsed = time.time() - start
+        #    plan=np.array(plan)
+        #    l=[]
+        #     #print([plan.action for action in plan])
+        #    if plan is not None:
+        #         print("Plan found with %d actions in %.2f seconds" %
+        #             (len([act for act in plan if not act.isNoOp()]), elapsed))            
+        #         for i in range(len(plan)):
+        #             #print(plan[i])
+        #             l.append(plan[i])
+        #    else:
+        #         print("Could not find a plan in %.2f seconds" % elapsed)
 
-            #print(l[1])
-           m=[]
-           for i in range(len(l)):
-                a=str(l[i])
-                for k in a:
-                    if a[0].isupper():
-                        m.append(a)
-                        break
-           plan_general=m
-           #print("Plan in graph -plan",plan_general)
-           # expansion of names of actions graph notation
-           for i in range(len(plan_general)):
-               if plan_general[i]=="Pr2":
-                   plan_general[i]="taking_photo"
-               if plan_general[i]=="Tr3":
-                   plan_general[i]="making_turn"
-           print("Plan: ",plan_general)
-        else:
-           time.sleep()
-           print("No valid option")
+        #     #print(l[1])
+        #    m=[]
+        #    for i in range(len(l)):
+        #         a=str(l[i])
+        #         for k in a:
+        #             if a[0].isupper():
+        #                 m.append(a)
+        #                 break
+        #    plan_general=m
+        #    #print("Plan in graph -plan",plan_general)
+        #    # expansion of names of actions graph notation
+        #    for i in range(len(plan_general)):
+        #        if plan_general[i]=="Pr2":
+        #            plan_general[i]="taking_photo"
+        #        if plan_general[i]=="Tr3":
+        #            plan_general[i]="making_turn"
+        #    print("Plan: ",plan_general)
+        # else:
+        #    time.sleep()
+        #    print("No valid option")
    
     
-        # 5.2) Reading the plan 
-        print("  ")
-        print("Reading the plan from AI planner")
-        print("  ")
-        plan_general=plan_general
-        print(plan_general[0])
+        # # 5.2) Reading the plan 
+        # print("  ")
+        # print("Reading the plan from AI planner")
+        # print("  ")
+        # plan_general=plan_general
+        # print(plan_general[0])
 
-        # 5.3) Start mission execution 
-        # convert string into functions and executing
-        print("")
-        print("Starting mission execution")
-        # Start simulations with battery = 100%
-        battery=100
-        task_finished=0
-        task_total=len(plan_general)
-        i_ini=0
-        while i_ini < task_total:
-            move_robot_waypoint0_waypoint1()
-            #taking_photo_exe()
+        # # 5.3) Start mission execution 
+        # # convert string into functions and executing
+        # print("")
+        # print("Starting mission execution")
+        # # Start simulations with battery = 100%
+        # battery=100
+        # task_finished=0
+        # task_total=len(plan_general)
+        # i_ini=0
+        # while i_ini < task_total:
+        #     move_robot_waypoint0_waypoint1()
+        #     #taking_photo_exe()
 
-            plan_temp=plan_general[i_ini].split()
-            print(plan_temp)
-            if plan_temp[0]=="check_pump_picture_ir":
-                print("Inspect -pump")
-                time.sleep(1)
+        #     plan_temp=plan_general[i_ini].split()
+        #     print(plan_temp)
+        #     if plan_temp[0]=="check_pump_picture_ir":
+        #         print("Inspect -pump")
+        #         time.sleep(1)
 
-            if plan_temp[0]=="check_seals_valve_picture_eo":
-                print("check-valve-EO")
+        #     if plan_temp[0]=="check_seals_valve_picture_eo":
+        #         print("check-valve-EO")
 
-                time.sleep(1)
+        #         time.sleep(1)
 
-            if plan_temp[0]=="move_robot":
-                print("move_robot_waypoints")
+        #     if plan_temp[0]=="move_robot":
+        #         print("move_robot_waypoints")
 
-                time.sleep(1)
+        #         time.sleep(1)
 
-            if plan_temp[0]=="move_charge_robot":
-                print("")
-                print("Going to rechard robot")
+        #     if plan_temp[0]=="move_charge_robot":
+        #         print("")
+        #         print("Going to rechard robot")
 
-                time.sleep(1)
+        #         time.sleep(1)
 
-            if plan_temp[0]=="charge_battery":
-                print(" ")
-                print("charging battery")
+        #     if plan_temp[0]=="charge_battery":
+        #         print(" ")
+        #         print("charging battery")
 
-                time.sleep(1)
-
-
-            i_ini=i_ini+1  # Next tasks
+        #         time.sleep(1)
 
 
-        print("")
-        print("--------------------------------------")
-        print("All tasks were performed successfully")
-        time.sleep(10)  
+        #     i_ini=i_ini+1  # Next tasks
+
+
+        # print("")
+        # print("--------------------------------------")
+        # print("All tasks were performed successfully")
+        # time.sleep(10)  
+        WAYPOINTS = [[0.3,0.3],[4.6,0.7]]
+        turtlebot_move()
 
     except rospy.ROSInterruptException:
         rospy.loginfo("Action terminated.")
