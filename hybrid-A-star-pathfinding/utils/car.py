@@ -30,7 +30,7 @@ class SimpleCar:
         self.max_phi = max_phi
 
         self.carl = 1.6 * self.l
-        self.carw = 0.8 * self.l
+        self.carw = 0.8* self.l
 
         self.whll = 0.4 * self.l
         self.whlw = 0.2 * self.l

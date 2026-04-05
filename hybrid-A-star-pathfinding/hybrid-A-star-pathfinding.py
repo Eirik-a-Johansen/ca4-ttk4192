@@ -250,7 +250,7 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
     tc = map_grid()
     env = Environment(tc.obs)
-    car = SimpleCar(env, start_pos, end_pos, l=0.2)
+    car = SimpleCar(env, start_pos, end_pos, l=0.19)
     grid = Grid(env)
 
     hastar = HybridAstar(car, grid, reverse)
@@ -437,7 +437,14 @@ if __name__ == '__main__':
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
     args = p.parse_args()
-    start_pos = [0.35, 0.35, 0]      # Here defined initial position [x,y,angle]
-    end_pos = [4.3, 0.7, 0] # Target point [x,y, angle]
+    #WP1-2
+    # start_pos = [1.6, 0.3, 0]      # Here defined initial position [x,y,angle]
+    # end_pos = [3.4, 1.2, 0] # Target point [x,y, angle]
+    #WP2-3
+    # start_pos = [3.4, 1.2, 0]      # Here defined initial position [x,y,angle]
+    # end_pos = [3.5, 2.4, 0] # Target point [x,y, angle]
+    # #WP3-4
+    start_pos = [3.5, 2.4, 0]      # Here defined initial position [x,y,angle]
+    end_pos = [4.7,0.4 , 0] # Target point [x,y, angle]
     main_hybrid_a(args.heu,start_pos,end_pos,args.r,args.e,args.g)
     print("An optimal path was computed using hybrid A* algorithm")
