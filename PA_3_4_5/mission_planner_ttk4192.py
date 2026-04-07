@@ -27,6 +27,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 import shutil
 import copy
+import moveit_commander
 # Import here the packages used in your codes
 
 """ ----------------------------------------------------------------------------------
@@ -482,6 +483,57 @@ def taking_photo_exe():
     shutil.move(file_source + g, file_destination)
     rospy.sleep(1)
 
+class TB3Manipulator:
+    def __init__(self):
+        # Do not call rospy.init_node() here if your main already does it
+        moveit_commander.roscpp_initialize(sys.argv)
+
+        self.arm = moveit_commander.MoveGroupCommander("arm")
+        self.gripper = moveit_commander.MoveGroupCommander("gripper")
+
+        self.arm.set_max_velocity_scaling_factor(0.3)
+        self.arm.set_max_acceleration_scaling_factor(0.3)
+        self.gripper.set_max_velocity_scaling_factor(1.0)
+        self.gripper.set_max_acceleration_scaling_factor(1.0)
+
+    def _go_named(self, group, name):
+        group.set_named_target(name)
+        ok = group.go(wait=True)
+        group.stop()
+        group.clear_pose_targets()
+        return ok
+
+    def arm_home(self):
+        return self._go_named(self.arm, "home")
+
+    def arm_init(self):
+        return self._go_named(self.arm, "init")
+
+    def open_gripper(self):
+        return self._go_named(self.gripper, "open")
+
+    def close_gripper(self):
+        return self._go_named(self.gripper, "close")
+
+def use_gripper_exe(open_first=True):
+    manip = TB3Manipulator()
+
+    rospy.loginfo("Moving arm to init")
+    manip.arm_init()
+    rospy.sleep(1)
+
+    if open_first:
+        rospy.loginfo("Opening gripper")
+        manip.open_gripper()
+        rospy.sleep(1)
+
+    rospy.loginfo("Closing gripper")
+    manip.close_gripper()
+    rospy.sleep(1)
+
+    rospy.loginfo("Returning arm home")
+    manip.arm_home()
+
 #Think this is good, needs testing
 def move_robot_waypoint0_waypoint1(start_pos=[2, 2, 0], end_pos=[6, 6, 3*pi/4]):
     # This function executes Move Robot from 1 to 2
@@ -728,8 +780,10 @@ if __name__ == '__main__':
         # print("--------------------------------------")
         # print("All tasks were performed successfully")
         # time.sleep(10)  
-        WAYPOINTS = [[0.3,0.3],[4.6,0.7]]
-        turtlebot_move()
+        WAYPOINTS = [[1.99,2.45],[2.99,2.45],]
+        # turtlebot_move()
+        # check_seals_valve_picture_eo(1)
+        use_gripper_exe()
 
     except rospy.ROSInterruptException:
         rospy.loginfo("Action terminated.")
