@@ -485,9 +485,7 @@ def taking_photo_exe():
 
 class TB3Manipulator:
     def __init__(self):
-        # Do not call rospy.init_node() here if your main already does it
         moveit_commander.roscpp_initialize(sys.argv)
-
         self.arm = moveit_commander.MoveGroupCommander("arm")
         self.gripper = moveit_commander.MoveGroupCommander("gripper")
 
@@ -496,43 +494,47 @@ class TB3Manipulator:
         self.gripper.set_max_velocity_scaling_factor(1.0)
         self.gripper.set_max_acceleration_scaling_factor(1.0)
 
-    def _go_named(self, group, name):
-        group.set_named_target(name)
-        ok = group.go(wait=True)
-        group.stop()
-        group.clear_pose_targets()
+    def arm_home(self):
+        self.arm.set_named_target("home")
+        ok = self.arm.go(wait=True)
+        self.arm.stop()
+        self.arm.clear_pose_targets()
         return ok
 
-    def arm_home(self):
-        return self._go_named(self.arm, "home")
+    def set_gripper(self, value):
+        rospy.loginfo(f"Setting gripper joint to {value}")
 
-    def arm_init(self):
-        return self._go_named(self.arm, "init")
+        # only target the ACTIVE joint
+        self.gripper.set_joint_value_target({"gripper": value})
+
+        ok = self.gripper.go(wait=True)
+        self.gripper.stop()
+        self.gripper.clear_pose_targets()
+
+        rospy.loginfo(f"Gripper result: {ok}")
+        rospy.loginfo(f"Current gripper values: {self.gripper.get_current_joint_values()}")
+        return ok
 
     def open_gripper(self):
-        return self._go_named(self.gripper, "open")
+        return self.set_gripper(0.01)
 
     def close_gripper(self):
-        return self._go_named(self.gripper, "close")
+        return self.set_gripper(-0.01)
 
-def use_gripper_exe(open_first=True):
+def use_gripper_exe():
     manip = TB3Manipulator()
 
-    rospy.loginfo("Moving arm to init")
-    manip.arm_init()
+    rospy.loginfo("Moving arm to home")
+    manip.arm_home()
     rospy.sleep(1)
 
-    if open_first:
-        rospy.loginfo("Opening gripper")
-        manip.open_gripper()
-        rospy.sleep(1)
+    rospy.loginfo("Opening gripper")
+    manip.open_gripper()
+    rospy.sleep(1)
 
     rospy.loginfo("Closing gripper")
     manip.close_gripper()
     rospy.sleep(1)
-
-    rospy.loginfo("Returning arm home")
-    manip.arm_home()
 
 #Think this is good, needs testing
 def move_robot_waypoint0_waypoint1(start_pos=[2, 2, 0], end_pos=[6, 6, 3*pi/4]):
