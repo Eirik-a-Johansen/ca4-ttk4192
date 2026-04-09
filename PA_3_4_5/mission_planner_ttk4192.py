@@ -515,11 +515,21 @@ class TB3Manipulator:
         rospy.loginfo(f"Current gripper values: {self.gripper.get_current_joint_values()}")
         return ok
 
+    # def open_gripper(self):
+    #     return self.set_gripper(0.01)
+
+    # def close_gripper(self):
+    #     return self.set_gripper(-0.01)
+
     def open_gripper(self):
-        return self.set_gripper(0.01)
+        self.gripper.set_joint_value_target({"gripper": 0.010})
+        self.gripper.go(wait=True)
+        self.gripper.stop()
 
     def close_gripper(self):
-        return self.set_gripper(-0.01)
+        self.gripper.set_joint_value_target({"gripper": -0.010})
+        self.gripper.go(wait=True)
+        self.gripper.stop()
 
 def use_gripper_exe():
     manip = TB3Manipulator()
