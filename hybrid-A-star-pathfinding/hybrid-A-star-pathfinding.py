@@ -4,7 +4,6 @@ import time
 import argparse
 import matplotlib.animation as animation
 from math import pi, tan, sqrt
-import matplotlib.pyplot as plt
 from matplotlib.collections import PatchCollection, LineCollection
 from matplotlib.patches import Rectangle
 from itertools import product
@@ -437,6 +436,8 @@ if __name__ == '__main__':
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
     args = p.parse_args()
+    start_pos = [0.3, 0.3, 0]      # Here defined initial position [x,y,angle]
+    end_pos = [1.6, 0.3, 0] # Target point [x,y, angle]
     #WP1-2
     # start_pos = [1.6, 0.3, 0]      # Here defined initial position [x,y,angle]
     # end_pos = [3.4, 1.2, 0] # Target point [x,y, angle]
@@ -444,7 +445,7 @@ if __name__ == '__main__':
     # start_pos = [3.4, 1.2, 0]      # Here defined initial position [x,y,angle]
     # end_pos = [3.5, 2.4, 0] # Target point [x,y, angle]
     # #WP3-4
-    start_pos = [3.5, 2.4, 0]      # Here defined initial position [x,y,angle]
-    end_pos = [4.7,0.4 , 0] # Target point [x,y, angle]
+    # start_pos = [3.5, 2.4, 0]      # Here defined initial position [x,y,angle]
+    # end_pos = [4.7,0.4 , 0] # Target point [x,y, angle]
     main_hybrid_a(args.heu,start_pos,end_pos,args.r,args.e,args.g)
     print("An optimal path was computed using hybrid A* algorithm")

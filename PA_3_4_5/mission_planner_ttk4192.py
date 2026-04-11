@@ -2,13 +2,14 @@
 import rospy
 import os
 import tf
+import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from math import pi, sqrt, atan2, tan
 from os import system, name
-import time 
+import time
 import re
 import fileinput
 import sys
@@ -28,6 +29,10 @@ from cv_bridge import CvBridge, CvBridgeError
 import shutil
 import copy
 import moveit_commander
+from utils.grid import Grid
+from utils.car import SimpleCar
+from utils.environment import Environment
+from utils.dubins_path import DubinsPath
 # Import here the packages used in your codes
 
 """ ----------------------------------------------------------------------------------
@@ -38,11 +43,105 @@ robot: Turtlebot3
 version: 1.1
 """ 
 
+# 1. Make it possible to run the plan.py file in this folder
+# 2. Read the plan
+# 3. Parse the plan
+# 4. Send commands to GNC, like State machine 
+
 
 # 1) Program here your AI planner 
+global WAYPOINTS
+WAYPOINTS = [[0.3,0.3],[1.6,0.3],[3.41,1.0], [3.36, 2.0], [5.15, 0.25], [0.87, 2.56], [3.86, 1.8]]
+
+WP_MAP={
+    "waypoint0": WAYPOINTS[0],
+    "waypoint1": WAYPOINTS[1],
+    "waypoint2": WAYPOINTS[2],
+    "waypoint3": WAYPOINTS[3],
+    "waypoint4": WAYPOINTS[4],
+    "waypoint5": WAYPOINTS[5],
+    "waypoint6": WAYPOINTS[6]
+}
 """
 Graph plan ---------------------------------------------------------------------------
 """
+def run_stp_planner(domain_file, problem_file):
+    venv_python    = "/home/appuser/catkin_ws/src/temporal-planning-main/bin/python2.7"
+    planner_script = "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/bin/plan.py"
+    planner_dir    = "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning"
+    plan_file      = os.path.join(planner_dir, "tmp_sas_plan.1")
+ 
+    # Mimic what 'source activate' does — prepend venv bin to PATH
+    venv_bin = "/home/appuser/catkin_ws/src/temporal-planning-main/bin"
+    env = os.environ.copy()
+    env["PATH"] = venv_bin + ":" + env["PATH"]
+    env["VIRTUAL_ENV"] = "/home/appuser/catkin_ws/src/temporal-planning-main"
+ 
+    cmd = [
+        venv_python, planner_script, "stp-2",
+        domain_file,
+        problem_file
+    ]
+ 
+    print("[Planner] Running STP planner...")
+ 
+    result = subprocess.run(
+        cmd,
+        cwd=planner_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env  # <-- pass the modified environment
+    )
+ 
+    print(result.stdout.decode())
+    if result.returncode != 0:
+        print("[Planner] Error:")
+        print(result.stderr.decode())
+        return None
+ 
+    if not os.path.exists(plan_file):
+        print("[Planner] Plan file not found — planner may have failed.")
+        return None
+ 
+    return parse_plan(plan_file)
+
+def parse_plan(plan_file):
+    """
+    Parses the tmp_sas_plan.1 file and returns a list of actions.
+    Each action is a dict with keys: time, action, args, duration
+    """
+    actions = []
+    with open(plan_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith(';'):
+                continue
+            # Format: <time>: (<action> <args>) [<duration>]
+            # Example: 0.000: (move turtlebot0 wp0 wp1 d01) [5.000]
+            try:
+                time_part, rest = line.split(':', 1)
+                action_part = rest.strip().lstrip('(').split(')')[0]
+                tokens = action_part.strip().split()
+                action_name = tokens[0]
+                action_args = tokens[1:]
+                duration = None
+                if '[' in line:
+                    duration = float(line.split('[')[1].rstrip(']'))
+                actions.append({
+                    'time':     float(time_part.strip()),
+                    'action':   action_name,
+                    'args':     action_args,
+                    'duration': duration
+                })
+            except Exception as e:
+                print(f"[Planner] Could not parse line: {line} ({e})")
+ 
+    print(f"[Planner] Found {len(actions)} actions in plan.")
+    for a in actions:
+        print(f"  t={a['time']:.3f}: {a['action']} {' '.join(a['args'])}")
+    return actions
+
 class GraphPlan(object):
     def __init__(self, domain, problem):
         self.independentActions = []
@@ -228,45 +327,233 @@ class turtlebot_move():
 # 3) Program here your path-finding algorithm
 """ Hybrid A-star pathfinding --------------------------------------------------------------------
 """
-
-class Node:
-    """ Hybrid A* tree node. """
-
-    def __init__(self, grid_pos, pos):
-
-        self.grid_pos = grid_pos
-        self.pos = pos
-        self.g = None
-        self.g_ = None
-        self.f = None
-        self.parent = None
-        self.phi = 0
-        self.m = None
-        self.branches = []
-
 class HybridAstar:
     """ Hybrid A* search procedure. """
-
-    def __init__(self, car, grid_robplan, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1):
-        
+    def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1):
         self.car = car
-        self.grid = grid_robplan
+        self.grid = grid
         self.reverse = reverse
         self.unit_theta = unit_theta
         self.dt = dt
         self.check_dubins = check_dubins
 
+        self.start = self.car.start_pos
+        self.goal = self.car.end_pos
+
+        self.r = self.car.l / tan(self.car.max_phi)
+        self.drive_steps = int(sqrt(2)*self.grid.cell_size/self.dt) + 1
+        self.arc = self.drive_steps * self.dt
+        self.phil = [-self.car.max_phi, 0, self.car.max_phi]
+        self.ml = [1, -1]
+
+        if reverse:
+            self.comb = list(product(self.ml, self.phil))
+        else:
+            self.comb = list(product([1], self.phil))
+
+        self.dubins = DubinsPath(self.car)
+        self.astar = Astar(self.grid, self.goal[:2])
+        
+        self.w1 = 0.95 # weight for astar heuristic
+        self.w2 = 0.05 # weight for simple heuristic
+        self.w3 = 0.30 # weight for extra cost of steering angle change
+        self.w4 = 0.10 # weight for extra cost of turning
+        self.w5 = 2.00 # weight for extra cost of reversing
+
+        self.thetas = get_discretized_thetas(self.unit_theta)
+    
+    def construct_node(self, pos):
+        """ Create node for a pos. """
+
+        theta = pos[2]
+        pt = pos[:2]
+
+        theta = round_theta(theta % (2*pi), self.thetas)
+        
+        cell_id = self.grid.to_cell_id(pt)
+        grid_pos = cell_id + [theta]
+
+        node = Node(grid_pos, pos)
+
+        return node
+    
+    def simple_heuristic(self, pos):
+        """ Heuristic by Manhattan distance. """
+
+        return abs(self.goal[0]-pos[0]) + abs(self.goal[1]-pos[1])
+        
+    def astar_heuristic(self, pos):
+        """ Heuristic by standard astar. """
+
+        h1 = self.astar.search_path(pos[:2]) * self.grid.cell_size
+        h2 = self.simple_heuristic(pos[:2])
+        
+        return self.w1*h1 + self.w2*h2
+
+    def get_children(self, node, heu, extra):
+        """ Get successors from a state. """
+
+        children = []
+        for m, phi in self.comb:
+
+            # don't go back
+            if node.m and node.phi == phi and node.m*m == -1:
+                continue
+
+            if node.m and node.m == 1 and m == -1:
+                continue
+
+            pos = node.pos
+            branch = [m, pos[:2]]
+
+            for _ in range(self.drive_steps):
+                pos = self.car.step(pos, phi, m)
+                branch.append(pos[:2])
+
+            # check safety of route-----------------------
+            pos1 = node.pos if m == 1 else pos
+            pos2 = pos if m == 1 else node.pos
+            if phi == 0:
+                safe = self.dubins.is_straight_route_safe(pos1, pos2)
+            else:
+                d, c, r = self.car.get_params(pos1, phi)
+                safe = self.dubins.is_turning_route_safe(pos1, pos2, d, c, r)
+            # --------------------------------------------
+            
+            if not safe:
+                continue
+            
+            child = self.construct_node(pos)
+            child.phi = phi
+            child.m = m
+            child.parent = node
+            child.g = node.g + self.arc
+            child.g_ = node.g_ + self.arc
+
+            if extra:
+                # extra cost for changing steering angle
+                if phi != node.phi:
+                    child.g += self.w3 * self.arc
+                
+                # extra cost for turning
+                if phi != 0:
+                    child.g += self.w4 * self.arc
+                
+                # extra cost for reverse
+                if m == -1:
+                    child.g += self.w5 * self.arc
+
+            if heu == 0:
+                child.f = child.g + self.simple_heuristic(child.pos)
+            if heu == 1:
+                child.f = child.g + self.astar_heuristic(child.pos)
+            
+            children.append([child, branch])
+
+        return children
+    
+    def best_final_shot(self, open_, closed_, best, cost, d_route, n=10):
+        """ Search best final shot in open set. """
+
+        open_.sort(key=lambda x: x.f, reverse=False)
+
+        for t in range(min(n, len(open_))):
+            best_ = open_[t]
+            solutions_ = self.dubins.find_tangents(best_.pos, self.goal)
+            d_route_, cost_, valid_ = self.dubins.best_tangent(solutions_)
+        
+            if valid_ and cost_ + best_.g_ < cost + best.g_:
+                best = best_
+                cost = cost_
+                d_route = d_route_
+        
+        if best in open_:
+            open_.remove(best)
+            closed_.append(best)
+        
+        return best, cost, d_route
+    
+    def backtracking(self, node):
+        """ Backtracking the path. """
+
+        route = []
+        while node.parent:
+            route.append((node.pos, node.phi, node.m))
+            node = node.parent
+        
+        return list(reversed(route))
+    
     def search_path(self, heu=1, extra=False):
         """ Hybrid A* pathfinding. """
+
+        root = self.construct_node(self.start)
+        root.g = float(0)
+        root.g_ = float(0)
+        
+        if heu == 0:
+            root.f = root.g + self.simple_heuristic(root.pos)
+        if heu == 1:
+            root.f = root.g + self.astar_heuristic(root.pos)
+
+        closed_ = []
+        open_ = [root]
+
+        count = 0
+        while open_:
+            count += 1
+            best = min(open_, key=lambda x: x.f)
+
+            open_.remove(best)
+            closed_.append(best)
+
+            # check dubins path
+            if count % self.check_dubins == 0:
+                solutions = self.dubins.find_tangents(best.pos, self.goal)
+                d_route, cost, valid = self.dubins.best_tangent(solutions)
+                
+                if valid:
+                    best, cost, d_route = self.best_final_shot(open_, closed_, best, cost, d_route)
+                    route = self.backtracking(best) + d_route
+                    path = self.car.get_path(self.start, route)
+                    cost += best.g_
+                    print('Shortest path: {}'.format(round(cost, 2)))
+                    print('Total iteration:', count)
+                    
+                    return path, closed_
+
+            children = self.get_children(best, heu, extra)
+
+            for child, branch in children:
+
+                if child in closed_:
+                    continue
+
+                if child not in open_:
+                    best.branches.append(branch)
+                    open_.append(child)
+
+                elif child.g < open_[open_.index(child)].g:
+                    best.branches.append(branch)
+
+                    c = open_[open_.index(child)]
+                    p = c.parent
+                    for b in p.branches:
+                        if same_point(b[-1], c.pos[:2]):
+                            p.branches.remove(b)
+                            break
+                    
+                    open_.remove(child)
+                    open_.append(child)
+
         return None, None
 
 
 def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
-    tc = map_grid_robplan()
-    env = Environment_robplan(tc.obs)
-    car = SimpleCar_robplan(env, start_pos, end_pos)
-    grid = Grid_robplan(env)
+    tc = map_grid()
+    env = Environment(tc.obs)
+    car = SimpleCar(env, start_pos, end_pos, l=0.19)
+    grid = Grid(env)
 
     hastar = HybridAstar(car, grid, reverse)
 
@@ -279,9 +566,6 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
         return
     # a post-processing is required to have path list
     path = path[::5] + [path[-1]]
-    #for i in range(len(path)):
-    #    print(path[i].pos[0])
-    
     branches = []
     bcolors = []
     for node in closed_:
@@ -303,11 +587,11 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
         elif dt_s*i<len(path):
             xl_np1.append(path[i*dt_s].pos[0])
             yl_np1.append(path[i*dt_s].pos[1])      
-    # defining way-points (traslandado el origen a (0,0))
+    # defining way-points
     xl_np=np.array(xl_np1)
-    xl_np=xl_np-20
+    xl_np=xl_np-10
     yl_np=np.array(yl_np1)
-    yl_np=yl_np-11.2
+    yl_np=yl_np-10
     global WAYPOINTS
     WAYPOINTS=np.column_stack([xl_np,yl_np])
     #print(WAYPOINTS)
@@ -338,15 +622,6 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
     ax.plot(car.start_pos[0], car.start_pos[1], 'ro', markersize=6)
     ax = plot_a_car(ax, end_state.model)
     ax = plot_a_car(ax, start_state.model)
-
-    # _branches = LineCollection(branches, color='b', alpha=0.8, linewidth=1)
-    # ax.add_collection(_branches)
-
-    # _carl = PatchCollection(carl[::20], color='m', alpha=0.1, zorder=3)
-    # ax.add_collection(_carl)
-    # ax.plot(xl, yl, color='whitesmoke', linewidth=2, zorder=3)
-    # _car = PatchCollection(path[-1].model, match_original=True, zorder=4)
-    # ax.add_collection(_car)
 
     _branches = LineCollection([], linewidth=1)
     ax.add_collection(_branches)
@@ -407,18 +682,53 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
     plt.show()
 
-# Create a map grid here for Hybrid A* 
+class Node:
+    """ Hybrid A* tree node. """
 
-class map_grid_robplan:
+    def __init__(self, grid_pos, pos):
+
+        self.grid_pos = grid_pos
+        self.pos = pos
+        self.g = None
+        self.g_ = None
+        self.f = None
+        self.parent = None
+        self.phi = 0
+        self.m = None
+        self.branches = []
+
+    def __eq__(self, other):
+
+        return self.grid_pos == other.grid_pos
+    
+    def __hash__(self):
+
+        return hash((self.grid_pos))
+    
+class map_grid:
+    """ Here the obstacles are defined for a 20x20 map. """
     def __init__(self):
 
-        self.start_pos2 = [4, 4, 0]
-        self.end_pos2 = [4, 8, -pi]
+        self.start_pos2 = [4, 4, 0]  # default values
+        self.end_pos2 = [4, 8, -pi]  # default
         self.obs = [
-            [25, 0, 15, 2], 
-            [0, 0, 1.37, 1.37],   
-            [38.6, 2, 1.37, 1.37], 
-            [25.5, 21, 1.37, 1.37],   
+            #x,y,x-bredde,y-høyde
+        
+            [0.0, 0.0,   3.3,  0.05],
+            [3.275, 0.0, 0.05, 0.2],
+            [3.3, 0.175, 1.91, 0.05],
+            [0.0, 2.725, 5.21, 0.05],
+            [0.0, 0.0,   0.05, 1.0],
+            [0.0, 0.975, 0.5,  0.05],
+            [0.475, 1.0, 0.05, 0.2],
+            [0.0, 1.175, 0.5,  0.05],
+            [0.0, 1.2,   0.05, 1.55],
+            [5.185, 0.2, 0.05, 2.55],
+            [1.2, 1.65, 0.2, 0.4],
+            [2.3, 1.65, 0.4, 0.4],
+            [3.66, 1.8, 0.4, 0.2],
+            [1.35, 0.6, 0.5, 0.2],
+            [3.16, 0.8, 0.5, 0.2],
         ]
 
 
@@ -652,8 +962,7 @@ def charge_battery_waypoint0():
 
 
 # Define the global varible: WAYPOINTS  Wpts=[[x_i,y_i]];
-global WAYPOINTS
-WAYPOINTS = [[0.2,0.2],[1.6,0.6],[3.41,1.0], [3.36, 2.0], [5.15, 0.25], [0.87, 2.56], [3.86, 1.8]]
+
 
 
 # 5) Program here the main commands of your mission planner code
@@ -661,141 +970,100 @@ WAYPOINTS = [[0.2,0.2],[1.6,0.6],[3.41,1.0], [3.36, 2.0], [5.15, 0.25], [0.87, 2
 """
 if __name__ == '__main__':
     try:
-        # print()
-        # print("************ TTK4192 - Assigment 4 **************************")
-        # print()
-        # print("AI planners: GraphPlan")
-        # print("Path-finding: Hybrid A-star")
-        # print("GNC Controller: PID path-following")
-        # print("Robot: Turtlebot3 waffle-pi")
-        # print("date: 20.03.23")
-        # print()
-        # print("**************************************************************")
-        # print()
-        # print("Press Intro to start ...")
-        # input_t=input("")
-        # # 5.0) Testing the GNC module (uncomment lines to test)
-
-        # # aea
-        # # aea 2
-        # # aea 3
-        # # aea 4
-        
-
-		# # 5.1) Starting the AI Planner
-       
-        # a_plan=1    
-        # if a_plan==1:
-        #    print(" ---Executing Graph planner --- ")
-        #    time.sleep(1)
-        #    if len(sys.argv) != 1 and len(sys.argv) != 3:
-        #         print("Usage: GraphPlan.py domainName problemName")
-        #         exit()
-        #     # Here you need to load your PDDL domain
-        #    dir_p="/home/miguel/catkin_ws/src/assigment4_ttk4192/scripts/ai_planner_modules/PDDL_domain/"
-        #    domain = dir_p+"dwrDomain_turtlebot.txt"
-        #    problem = dir_p+"dwrProblem_turtlebot.txt"
-        #    if len(sys.argv) == 3:
-        #         domain = str(sys.argv[1])
-        #         problem = str(sys.argv[2])
-        #    gp = GraphPlan(domain, problem)
-        #    start = time.time()
-        #    plan = gp.graphPlan()
-        #    elapsed = time.time() - start
-        #    plan=np.array(plan)
-        #    l=[]
-        #     #print([plan.action for action in plan])
-        #    if plan is not None:
-        #         print("Plan found with %d actions in %.2f seconds" %
-        #             (len([act for act in plan if not act.isNoOp()]), elapsed))            
-        #         for i in range(len(plan)):
-        #             #print(plan[i])
-        #             l.append(plan[i])
-        #    else:
-        #         print("Could not find a plan in %.2f seconds" % elapsed)
-
-        #     #print(l[1])
-        #    m=[]
-        #    for i in range(len(l)):
-        #         a=str(l[i])
-        #         for k in a:
-        #             if a[0].isupper():
-        #                 m.append(a)
-        #                 break
-        #    plan_general=m
-        #    #print("Plan in graph -plan",plan_general)
-        #    # expansion of names of actions graph notation
-        #    for i in range(len(plan_general)):
-        #        if plan_general[i]=="Pr2":
-        #            plan_general[i]="taking_photo"
-        #        if plan_general[i]=="Tr3":
-        #            plan_general[i]="making_turn"
-        #    print("Plan: ",plan_general)
-        # else:
-        #    time.sleep()
-        #    print("No valid option")
-   
-    
-        # # 5.2) Reading the plan 
-        # print("  ")
-        # print("Reading the plan from AI planner")
-        # print("  ")
-        # plan_general=plan_general
-        # print(plan_general[0])
-
-        # # 5.3) Start mission execution 
-        # # convert string into functions and executing
-        # print("")
-        # print("Starting mission execution")
-        # # Start simulations with battery = 100%
-        # battery=100
-        # task_finished=0
-        # task_total=len(plan_general)
-        # i_ini=0
-        # while i_ini < task_total:
-        #     move_robot_waypoint0_waypoint1()
-        #     #taking_photo_exe()
-
-        #     plan_temp=plan_general[i_ini].split()
-        #     print(plan_temp)
-        #     if plan_temp[0]=="check_pump_picture_ir":
-        #         print("Inspect -pump")
-        #         time.sleep(1)
-
-        #     if plan_temp[0]=="check_seals_valve_picture_eo":
-        #         print("check-valve-EO")
-
-        #         time.sleep(1)
-
-        #     if plan_temp[0]=="move_robot":
-        #         print("move_robot_waypoints")
-
-        #         time.sleep(1)
-
-        #     if plan_temp[0]=="move_charge_robot":
-        #         print("")
-        #         print("Going to rechard robot")
-
-        #         time.sleep(1)
-
-        #     if plan_temp[0]=="charge_battery":
-        #         print(" ")
-        #         print("charging battery")
-
-        #         time.sleep(1)
-
-
-        #     i_ini=i_ini+1  # Next tasks
-
-
-        # print("")
-        # print("--------------------------------------")
-        # print("All tasks were performed successfully")
-        # time.sleep(10)  
-        WAYPOINTS = [[1.99,2.45],[2.99,2.45],]
+        print()
+        print("************ TTK4192 - Assigment 4 **************************")
+        print()
+        print("AI planners: GraphPlan")
+        print("Path-finding: Hybrid A-star")
+        print("GNC Controller: PID path-following")
+        print("Robot: Turtlebot3 waffle-pi")
+        print("date: 20.03.23")
+        print()
+        print("**************************************************************")
+        print()
+        print("Press Intro to start ...")
+        input_t=input("")
+ 
+        # WAYPOINTS = [[1.99,2.45],[2.99,2.45],]
         # turtlebot_move()
         # check_seals_valve_picture_eo(1)
-        use_gripper_exe()
+        # use_gripper_exe()
 
+        plan = run_stp_planner("/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/domains/ttk4192/domain/PDDL_domain_1_improved.pddl",
+                         "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/domains/ttk4192/problem/PDDL_problem_1.pddl")
+ 
+        if plan:
+            print("\n[Planner] Plan summary:")
+            for step, a in enumerate(plan, 1):
+                print(f"  {step}: {a['action']} {' '.join(a['args'])}")
+
+        # 5.3) Start mission execution
+        print("")
+        print("Starting mission execution")
+        
+        # Start simulations with battery = 100%
+        battery = 100
+        task_finished = 0
+        task_total = len(plan)
+        i_ini = 0
+
+        while i_ini < task_total:
+            action = plan[i_ini]
+            action_name = action['action']
+            action_args = action['args']
+
+            print(f"\n[Mission] Step {i_ini+1}/{task_total}: {action_name} {' '.join(action_args)}")
+
+            if action_name == "move_robot":
+                # args: [robot, from_wp, to_wp, route]
+                from_wp = action_args[1]
+                to_wp   = action_args[2]
+                print(f"[Mission] Moving robot from {from_wp} to {to_wp}")
+                move_robot_waypoint0_waypoint1(WP_MAP[from_wp],WP_MAP[to_wp])  # replace with your move function
+                # WAYPOINTS=[WP_MAP[from_wp],WP_MAP[to_wp]]
+                # turtlebot_move()
+                time.sleep(1)
+
+            elif action_name == "take_picture_pump_ir":
+                # args: [robot, waypoint, camera,  pump]
+                waypoint = action_args[1] if len(action_args) > 1 else "unknown"
+                target   = action_args[3] if len(action_args) > 2 else "unknown"
+                print(f"[Mission] Inspecting pump at {waypoint} — target: {target}")
+                # taking_photo_exe()  # uncomment when ready
+                time.sleep(1)
+
+            elif action_name == "check_seals_valve_picture_eo":
+                # args: [robot, waypoint, camera, valve]
+                waypoint = action_args[1] if len(action_args) > 1 else "unknown"
+                target   = action_args[2] if len(action_args) > 2 else "unknown"
+                print(f"[Mission] Checking valve EO at {waypoint} — target: {target}")
+                # taking_photo_exe()  # uncomment when ready
+                time.sleep(1)
+
+
+            elif action_name == "charge_battery":
+                # args: [robot, charger_wp, charger]
+                print(f"[Mission] Charging battery...")
+                battery = 100
+                time.sleep(1)
+
+            else:
+                print(f"[Mission] Unknown action: {action_name} — skipping")
+
+            task_finished += 1
+            # battery -= 5  # rough battery drain per action
+            print(f"[Mission] Battery: {battery}%")
+
+            i_ini += 1  # next task
+
+        print("")
+        print("--------------------------------------")
+        print(f"All {task_finished} tasks were performed successfully")
+        time.sleep(10)
+
+
+
+
+        
     except rospy.ROSInterruptException:
         rospy.loginfo("Action terminated.")
