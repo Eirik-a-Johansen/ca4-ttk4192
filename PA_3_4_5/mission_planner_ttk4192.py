@@ -51,7 +51,7 @@ version: 1.1
 
 # 1) Program here your AI planner 
 global WAYPOINTS
-WAYPOINTS = [[0.3,0.3],[1.6,0.3],[3.41,1.0], [3.36, 2.0], [5.15, 0.25], [0.87, 2.56], [3.86, 1.8]]
+WAYPOINTS = [[0.3,0.3,0],[1.6,0.3,0],[3.41,1.0,0], [3.36, 2.0,0], [5.15, 0.25,0], [0.87, 2.56,0], [3.86, 1.8,0]]
 
 WP_MAP={
     "waypoint0": WAYPOINTS[0],
@@ -981,8 +981,6 @@ if __name__ == '__main__':
         print()
         print("**************************************************************")
         print()
-        print("Press Intro to start ...")
-        input_t=input("")
  
         # WAYPOINTS = [[1.99,2.45],[2.99,2.45],]
         # turtlebot_move()
