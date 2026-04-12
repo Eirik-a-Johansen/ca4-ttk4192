@@ -167,16 +167,12 @@ class SimpleCar:
         path = []
 
         for goal, phi, m in route:
-            while True:
+            while not same_point(pos[:2], goal[:2]):
                 car_state = self.get_car_state(pos, phi)
                 path.append(car_state)
-
                 pos = self.step(pos, phi, m)
+            pos = goal
 
-                if same_point(pos[:2], goal[:2]):
-                    pos = goal
-                    break
-        
         car_state = self.get_car_state(pos, phi)
         path.append(car_state)
 

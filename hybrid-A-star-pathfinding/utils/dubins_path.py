@@ -202,7 +202,7 @@ class DubinsPath:
         vertex1 = self.car.get_car_bounding(t1)
         vertex2 = self.car.get_car_bounding(t2)
 
-        vertex = [vertex2[0], vertex2[1], vertex1[3], vertex1[2]]
+        vertex = [vertex2[0], vertex2[1], vertex1[2], vertex1[3]]
 
         return self.car.env.rectangle_safe(vertex)
     
