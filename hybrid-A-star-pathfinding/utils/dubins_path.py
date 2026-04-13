@@ -233,6 +233,13 @@ class DubinsPath:
         x, y, theta = start_pos
 
         delta_theta = end_pos[2] - theta
+        # Normalize delta_theta to match the turn direction, same logic as directional_theta.
+        # Without this, a theta crossing the 0/2π boundary produces a near-full-circle
+        # ringsector instead of the actual small arc, causing valid arcs to be rejected.
+        if d == 1 and delta_theta < 0:
+            delta_theta += 2 * pi
+        elif d == -1 and delta_theta > 0:
+            delta_theta -= 2 * pi
 
         p_inner = start_pos[:2]
         id = 1 if d == -1 else 2

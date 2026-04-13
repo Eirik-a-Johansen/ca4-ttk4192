@@ -55,7 +55,7 @@ class HybridAstar:
         self.w2 = 0.05 # weight for simple heuristic
         self.w3 = 0.30 # weight for extra cost of steering angle change
         self.w4 = 0.10 # weight for extra cost of turning
-        self.w5 = 2.00 # weight for extra cost of reversing
+        self.w5 = 1.00 # weight for extra cost of reversing
 
         self.thetas = get_discretized_thetas(self.unit_theta)
     
@@ -96,13 +96,11 @@ class HybridAstar:
         children = []
         for m, phi in self.comb:
 
-            # don't go back
+            # don't immediately reverse on the same arc (would retrace exact path)
             if node.m and node.phi == phi and node.m*m == -1:
                 continue
-
             if node.m and node.m == 1 and m == -1:
                 continue
-
             pos = node.pos
             branch = [m, pos[:2]]
 
@@ -141,6 +139,10 @@ class HybridAstar:
                 
                 # extra cost for reverse
                 if m == -1:
+                    child.g += self.w5 * self.arc
+
+                # extra cost for direction change (forward <-> reverse)
+                if node.m and node.m != m:
                     child.g += self.w5 * self.arc
 
             if heu == 0:
@@ -198,6 +200,8 @@ class HybridAstar:
         closed_ = []
         open_ = [root]
 
+        goal_node = self.construct_node(self.goal)
+
         count = 0
         while open_:
             count += 1
@@ -206,19 +210,28 @@ class HybridAstar:
             open_.remove(best)
             closed_.append(best)
 
+            # check if A* expansion reached the goal cell directly
+            if best.grid_pos == goal_node.grid_pos:
+                route = self.backtracking(best)
+                path = self.car.get_path(self.start, route)
+                cost = best.g_
+                print('Path found (direct): {}'.format(round(cost, 2)))
+                print('Total iteration:', count)
+                return path, closed_
+
             # check dubins path
             if count % self.check_dubins == 0:
                 solutions = self.dubins.find_tangents(best.pos, self.goal)
                 d_route, cost, valid = self.dubins.best_tangent(solutions)
-                
+
                 if valid:
                     best, cost, d_route = self.best_final_shot(open_, closed_, best, cost, d_route)
                     route = self.backtracking(best) + d_route
                     path = self.car.get_path(self.start, route)
                     cost += best.g_
-                    print('Shortest path: {}'.format(round(cost, 2)))
+                    print('Shortest path (Dubins): {}'.format(round(cost, 2)))
                     print('Total iteration:', count)
-                    
+
                     return path, closed_
 
             children = self.get_children(best, heu, extra)
@@ -245,7 +258,63 @@ class HybridAstar:
                     open_.remove(child)
                     open_.append(child)
 
-        return None, None
+        return None, closed_
+
+
+def plot_search_space(env, car, grid, closed_, grid_on):
+    """ Plot explored search space when no valid path was found. """
+
+    branches = []
+    bcolors = []
+    for node in closed_:
+        for b in node.branches:
+            branches.append(b[1:])
+            bcolors.append('y' if b[0] == 1 else 'b')
+
+    all_x = [ob.x + ob.w for ob in env.obs] + [0]
+    all_y = [ob.y + ob.h for ob in env.obs] + [0]
+    room_w = max(all_x) + 0.3
+    room_h = max(all_y) + 0.3
+
+    fig, ax = plt.subplots(figsize=(max(6, 6*room_w/room_h), 6))
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_h)
+    ax.set_aspect("equal")
+    ax.set_title("No valid path found — explored search space", color='red')
+
+    if grid_on:
+        ax.set_xticks(np.arange(0, room_w, grid.cell_size))
+        ax.set_yticks(np.arange(0, room_h, grid.cell_size))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.tick_params(length=0)
+        plt.grid(which='both')
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ob in env.obs:
+        ax.add_patch(Rectangle((ob.x, ob.y), ob.w, ob.h, fc='gray', ec='k'))
+
+    start_state = car.get_car_state(car.start_pos)
+    end_state   = car.get_car_state(car.end_pos)
+    ax = plot_a_car(ax, end_state.model)
+    ax = plot_a_car(ax, start_state.model)
+    ax.plot(car.start_pos[0], car.start_pos[1], 'ro', markersize=6)
+    ax.plot(car.end_pos[0],   car.end_pos[1],   'rx', markersize=8, markeredgewidth=2)
+
+    if branches:
+        lc = LineCollection(branches, linewidth=0.6, colors=bcolors, alpha=0.7)
+        ax.add_collection(lc)
+
+    # mark every explored node position
+    xs = [n.pos[0] for n in closed_]
+    ys = [n.pos[1] for n in closed_]
+    ax.scatter(xs, ys, s=4, c='cyan', zorder=3, label=f'explored ({len(closed_)} nodes)')
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
 
 
 def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
@@ -263,6 +332,9 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
     if not path:
         print('No valid path!')
+        if closed_:
+            print('Plotting explored search space ({} nodes)...'.format(len(closed_)))
+            plot_search_space(env, car, grid, closed_, grid_on)
         return
     # a post-processing is required to have path list
     path = path[::5] + [path[-1]]
@@ -446,20 +518,22 @@ if __name__ == '__main__':
     args = p.parse_args()
 
     WP_MAP = {
-        'WP1': [1.6,  0.3,  0],   # valid as-is
-        'WP2': [2.9,  1.3,  0],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+        'WP0': [0.6,  0.3,  0],   # valid as-is
+        'WP1': [1.6,  0.2,  np.pi/2],   # valid as-is
+        'WP2': [2.9,  1.3,  -np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+        'WP3': [3.36,  2.7,  np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
         'WP4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
         'WP5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
-        'WP6': [4.3,  2.2,  0],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
+        'WP6': [4.3,  2.2,  np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
     }
 
     mission = ['WP2', 'WP4', 'WP1', 'WP2', 'WP5', 'WP6']
-
+    #mission = ['WP1', 'WP0']
     for i in range(len(mission) - 1):
         start_name = mission[i]
         end_name   = mission[i + 1]
         start_pos  = WP_MAP[start_name]
         end_pos    = WP_MAP[end_name]
         print(f"\n--- Leg {i+1}: {start_name} -> {end_name} ---")
-        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g)
+        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g) #args.r
         print(f"Leg {i+1} done.")
