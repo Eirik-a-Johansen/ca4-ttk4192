@@ -51,16 +51,16 @@ version: 1.1
 
 # 1) Program here your AI planner 
 global WAYPOINTS
-WAYPOINTS = [[0.3,0.3,0],[1.6,0.3,0],[3.41,1.0,0], [3.36, 2.0,0], [5.15, 0.25,0], [0.87, 2.56,0], [3.86, 1.8,0]]
+WAYPOINTS = [[0.3,0.3,0],[1.6,0.3,0],[2.9,  1.3,0], [3.36, 2.7,0], [5.15, 0.25,0], [0.87, 2.56,0], [3.86, 1.8,0]]
 
-WP_MAP={
-    "waypoint0": WAYPOINTS[0],
-    "waypoint1": WAYPOINTS[1],
-    "waypoint2": WAYPOINTS[2],
-    "waypoint3": WAYPOINTS[3],
-    "waypoint4": WAYPOINTS[4],
-    "waypoint5": WAYPOINTS[5],
-    "waypoint6": WAYPOINTS[6]
+WP_MAP = {
+    'waypoint0': [0.3,  0.3,  0],   # valid as-is
+    'waypoint1': [1.6,  0.3,  0*np.pi/2],   # valid as-is
+    'waypoint2': [2.9,  1.3,  -0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint3': [3.36,  2.7,  0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
+    'waypoint5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
+    'waypoint6': [4.3,  2.2,  0*np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
 }
 """
 Graph plan ---------------------------------------------------------------------------
@@ -217,7 +217,9 @@ class turtlebot_move():
     Path-following module
     """
     def __init__(self):
-        rospy.init_node('turtlebot_move', anonymous=False)
+        if not rospy.core.is_initialized():
+            rospy.init_node('turtlebot_move', anonymous=False)
+
         rospy.loginfo("Press CTRL + C to terminate")
         rospy.on_shutdown(self.stop)
 
@@ -358,7 +360,7 @@ class HybridAstar:
         self.w2 = 0.05 # weight for simple heuristic
         self.w3 = 0.30 # weight for extra cost of steering angle change
         self.w4 = 0.10 # weight for extra cost of turning
-        self.w5 = 2.00 # weight for extra cost of reversing
+        self.w5 = 1.00 # weight for extra cost of reversing
 
         self.thetas = get_discretized_thetas(self.unit_theta)
     
@@ -385,9 +387,12 @@ class HybridAstar:
     def astar_heuristic(self, pos):
         """ Heuristic by standard astar. """
 
-        h1 = self.astar.search_path(pos[:2]) * self.grid.cell_size
+        result = self.astar.search_path(pos[:2])
+        if result is None:
+            return self.simple_heuristic(pos[:2])
+        h1 = result * self.grid.cell_size
         h2 = self.simple_heuristic(pos[:2])
-        
+
         return self.w1*h1 + self.w2*h2
 
     def get_children(self, node, heu, extra):
@@ -396,13 +401,11 @@ class HybridAstar:
         children = []
         for m, phi in self.comb:
 
-            # don't go back
+            # don't immediately reverse on the same arc (would retrace exact path)
             if node.m and node.phi == phi and node.m*m == -1:
                 continue
-
             if node.m and node.m == 1 and m == -1:
                 continue
-
             pos = node.pos
             branch = [m, pos[:2]]
 
@@ -441,6 +444,10 @@ class HybridAstar:
                 
                 # extra cost for reverse
                 if m == -1:
+                    child.g += self.w5 * self.arc
+
+                # extra cost for direction change (forward <-> reverse)
+                if node.m and node.m != m:
                     child.g += self.w5 * self.arc
 
             if heu == 0:
@@ -498,6 +505,8 @@ class HybridAstar:
         closed_ = []
         open_ = [root]
 
+        goal_node = self.construct_node(self.goal)
+
         count = 0
         while open_:
             count += 1
@@ -506,19 +515,28 @@ class HybridAstar:
             open_.remove(best)
             closed_.append(best)
 
+            # check if A* expansion reached the goal cell directly
+            if best.grid_pos == goal_node.grid_pos:
+                route = self.backtracking(best)
+                path = self.car.get_path(self.start, route)
+                cost = best.g_
+                print('Path found (direct): {}'.format(round(cost, 2)))
+                print('Total iteration:', count)
+                return path, closed_
+
             # check dubins path
             if count % self.check_dubins == 0:
                 solutions = self.dubins.find_tangents(best.pos, self.goal)
                 d_route, cost, valid = self.dubins.best_tangent(solutions)
-                
+
                 if valid:
                     best, cost, d_route = self.best_final_shot(open_, closed_, best, cost, d_route)
                     route = self.backtracking(best) + d_route
                     path = self.car.get_path(self.start, route)
                     cost += best.g_
-                    print('Shortest path: {}'.format(round(cost, 2)))
+                    print('Shortest path (Dubins): {}'.format(round(cost, 2)))
                     print('Total iteration:', count)
-                    
+
                     return path, closed_
 
             children = self.get_children(best, heu, extra)
@@ -545,7 +563,63 @@ class HybridAstar:
                     open_.remove(child)
                     open_.append(child)
 
-        return None, None
+        return None, closed_
+
+
+def plot_search_space(env, car, grid, closed_, grid_on):
+    """ Plot explored search space when no valid path was found. """
+
+    branches = []
+    bcolors = []
+    for node in closed_:
+        for b in node.branches:
+            branches.append(b[1:])
+            bcolors.append('y' if b[0] == 1 else 'b')
+
+    all_x = [ob.x + ob.w for ob in env.obs] + [0]
+    all_y = [ob.y + ob.h for ob in env.obs] + [0]
+    room_w = max(all_x) + 0.3
+    room_h = max(all_y) + 0.3
+
+    fig, ax = plt.subplots(figsize=(max(6, 6*room_w/room_h), 6))
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_h)
+    ax.set_aspect("equal")
+    ax.set_title("No valid path found — explored search space", color='red')
+
+    if grid_on:
+        ax.set_xticks(np.arange(0, room_w, grid.cell_size))
+        ax.set_yticks(np.arange(0, room_h, grid.cell_size))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.tick_params(length=0)
+        plt.grid(which='both')
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ob in env.obs:
+        ax.add_patch(Rectangle((ob.x, ob.y), ob.w, ob.h, fc='gray', ec='k'))
+
+    start_state = car.get_car_state(car.start_pos)
+    end_state   = car.get_car_state(car.end_pos)
+    ax = plot_a_car(ax, end_state.model)
+    ax = plot_a_car(ax, start_state.model)
+    ax.plot(car.start_pos[0], car.start_pos[1], 'ro', markersize=6)
+    ax.plot(car.end_pos[0],   car.end_pos[1],   'rx', markersize=8, markeredgewidth=2)
+
+    if branches:
+        lc = LineCollection(branches, linewidth=0.6, colors=bcolors, alpha=0.7)
+        ax.add_collection(lc)
+
+    # mark every explored node position
+    xs = [n.pos[0] for n in closed_]
+    ys = [n.pos[1] for n in closed_]
+    ax.scatter(xs, ys, s=4, c='cyan', zorder=3, label=f'explored ({len(closed_)} nodes)')
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
 
 
 def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
@@ -563,6 +637,9 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
 
     if not path:
         print('No valid path!')
+        if closed_:
+            print('Plotting explored search space ({} nodes)...'.format(len(closed_)))
+            plot_search_space(env, car, grid, closed_, grid_on)
         return
     # a post-processing is required to have path list
     path = path[::5] + [path[-1]]
@@ -589,9 +666,9 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
             yl_np1.append(path[i*dt_s].pos[1])      
     # defining way-points
     xl_np=np.array(xl_np1)
-    xl_np=xl_np-10
+    xl_np=xl_np
     yl_np=np.array(yl_np1)
-    yl_np=yl_np-10
+    yl_np=yl_np
     global WAYPOINTS
     WAYPOINTS=np.column_stack([xl_np,yl_np])
     #print(WAYPOINTS)
@@ -600,14 +677,19 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
     end_state = car.get_car_state(car.end_pos)
 
     # plot and annimation
-    fig, ax = plt.subplots(figsize=(6,6))
-    ax.set_xlim(0, env.lx)
-    ax.set_ylim(0, env.ly)
+    # Compute actual room bounds from obstacles with a small margin
+    all_x = [ob.x + ob.w for ob in env.obs] + [0]
+    all_y = [ob.y + ob.h for ob in env.obs] + [0]
+    room_w = max(all_x) + 0.3
+    room_h = max(all_y) + 0.3
+    fig, ax = plt.subplots(figsize=(max(6, 6*room_w/room_h), 6))
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_h)
     ax.set_aspect("equal")
 
     if grid_on:
-        ax.set_xticks(np.arange(0, env.lx, grid.cell_size))
-        ax.set_yticks(np.arange(0, env.ly, grid.cell_size))
+        ax.set_xticks(np.arange(0, room_w, grid.cell_size))
+        ax.set_yticks(np.arange(0, room_h, grid.cell_size))
         ax.set_xticklabels([])
         ax.set_yticklabels([])
         ax.tick_params(length=0)
@@ -857,7 +939,7 @@ def use_gripper_exe():
     rospy.sleep(1)
 
 #Think this is good, needs testing
-def move_robot_waypoint0_waypoint1(start_pos=[2, 2, 0], end_pos=[6, 6, 3*pi/4]):
+def move_robot_waypoint0_waypoint1(start_pos, end_pos):
     # This function executes Move Robot from 1 to 2
     # This function uses hybrid A-star
     a=0
@@ -866,16 +948,39 @@ def move_robot_waypoint0_waypoint1(start_pos=[2, 2, 0], end_pos=[6, 6, 3*pi/4]):
         time.sleep(1)
         a=a+1
     print("Computing hybrid A* path")
-	
+
+    if not rospy.core.is_initialized():
+        rospy.init_node('mission_planner', anonymous=False)
+
+    # Read current pose from /odom so planning starts from where the robot is now.
+    try:
+        odom_msg = rospy.wait_for_message("/odom", Odometry, timeout=2.0)
+        q = [
+            odom_msg.pose.pose.orientation.x,
+            odom_msg.pose.pose.orientation.y,
+            odom_msg.pose.pose.orientation.z,
+            odom_msg.pose.pose.orientation.w,
+        ]
+        (_, _, yaw) = tf.transformations.euler_from_quaternion(q)
+        start_pos = [
+            odom_msg.pose.pose.position.x,
+            odom_msg.pose.pose.position.y,
+            yaw,
+        ]
+        rospy.loginfo(f"Using /odom start pose: {start_pos}")
+    except rospy.ROSException:
+        rospy.logwarn("No /odom received within 2s. Falling back to planner start waypoint.")
+
     p = argparse.ArgumentParser()
     p.add_argument('-heu', type=int, default=1, help='heuristic type')
     p.add_argument('-r', action='store_true', help='allow reverse or not')
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
-    args = p.parse_args()
-    main_hybrid_a(args.heu,start_pos,end_pos,args.r,args.e,args.g)
+    args, _ = p.parse_known_args()
+    main_hybrid_a(args.heu,start_pos,end_pos,True,args.e,args.g)
     print("Executing path following")
     turtlebot_move()
+    
 
 
 #Not done
