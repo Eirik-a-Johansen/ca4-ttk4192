@@ -28,7 +28,7 @@ from utils.utils import plot_a_car, get_discretized_thetas, round_theta, same_po
 class HybridAstar:
     """ Hybrid A* search procedure. """
     def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1,
-                 epsilon=8.5, max_iter=5000, use_spline=False):
+                 epsilon=3.0, max_iter=12000, use_spline=False):
         self.car = car
         self.grid = grid
         self.reverse = reverse
@@ -662,15 +662,15 @@ if __name__ == '__main__':
 
     WP_MAP = {
         'WP0': [0.6,  0.3,  0],   # valid as-is
-        'WP1': [1.6,  0.3,  np.pi/2],   # valid as-is
-        'WP2': [2.9,  1.3,  -np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
-        'WP3': [3.36,  2.7,  np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+        'WP1': [1.6,  0.3,  0],           # heading changed pi/2->0: pi/2 traps car (obstacle 4 blocks all forward arcs, south wall blocks all reverse arcs)
+        'WP2': [2.9,  1.3,   np.pi/2],   # heading changed from -pi/2: WP1 also faces north so no U-turn needed
+        'WP3': [3.36,  2.45, np.pi/2],   # y=2.7 was inside north wall; front edge now at y=2.697, 0.028m clear
         'WP4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
         'WP5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
         'WP6': [4.3,  2.2,  np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
     }
 
-    mission = ['WP2', 'WP4', 'WP1', 'WP2', 'WP5', 'WP6']
+    mission = ['WP0', 'WP1','WP2', 'WP5', 'WP6', 'WP3']
     #mission = ['WP1', 'WP0']
     for i in range(len(mission) - 1):
         start_name = mission[i]
