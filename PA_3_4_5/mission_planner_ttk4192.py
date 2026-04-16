@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import rospy
+import actionlib
 import os
 import tf
 import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
+from actionlib_msgs.msg import GoalStatus
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from math import pi, sqrt, atan2, tan
@@ -33,6 +35,7 @@ from utils.grid import Grid
 from utils.car import SimpleCar
 from utils.environment import Environment
 from utils.dubins_path import DubinsPath
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 # Import here the packages used in your codes
 
 """ ----------------------------------------------------------------------------------
@@ -62,6 +65,67 @@ WP_MAP = {
     'waypoint5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
     'waypoint6': [4.3,  2.2,  0*np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
 }
+
+NAVIGATION_STATUS_TEXT = {
+    GoalStatus.PENDING: "pending",
+    GoalStatus.ACTIVE: "active",
+    GoalStatus.PREEMPTED: "preempted",
+    GoalStatus.SUCCEEDED: "succeeded",
+    GoalStatus.ABORTED: "aborted",
+    GoalStatus.REJECTED: "rejected",
+    GoalStatus.PREEMPTING: "preempting",
+    GoalStatus.RECALLING: "recalling",
+    GoalStatus.RECALLED: "recalled",
+    GoalStatus.LOST: "lost",
+}
+
+def ensure_ros_node(name='mission_planner'):
+    if not rospy.core.is_initialized():
+        rospy.init_node(name, anonymous=False)
+
+def set_navigation_goal(x, y, yaw=0.0, frame_id="map", timeout=180.0):
+    """
+    Send a goal to the navigation stack. This uses the same move_base action
+    path that RViz's 2D Nav Goal and the SLAM navigation setup use.
+    """
+    ensure_ros_node()
+
+    client = actionlib.SimpleActionClient("move_base", MoveBaseAction)
+    rospy.loginfo("Waiting for move_base action server...")
+    if not client.wait_for_server(rospy.Duration(30.0)):
+        rospy.logerr("move_base action server is not available. Start turtlebot3_slam.launch or another launch file that brings up move_base.")
+        return False
+
+    goal = MoveBaseGoal()
+    goal.target_pose.header.frame_id = frame_id
+    goal.target_pose.header.stamp = rospy.Time.now()
+    goal.target_pose.pose.position.x = x
+    goal.target_pose.pose.position.y = y
+    goal.target_pose.pose.position.z = 0.0
+
+    quaternion = tf.transformations.quaternion_from_euler(0.0, 0.0, yaw)
+    goal.target_pose.pose.orientation.x = quaternion[0]
+    goal.target_pose.pose.orientation.y = quaternion[1]
+    goal.target_pose.pose.orientation.z = quaternion[2]
+    goal.target_pose.pose.orientation.w = quaternion[3]
+
+    rospy.loginfo(f"Sending navigation goal: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f}, frame={frame_id}")
+    client.send_goal(goal)
+
+    finished = client.wait_for_result(rospy.Duration(timeout))
+    if not finished:
+        rospy.logwarn(f"Navigation goal timed out after {timeout:.1f}s; cancelling goal.")
+        client.cancel_goal()
+        return False
+
+    status = client.get_state()
+    status_text = NAVIGATION_STATUS_TEXT.get(status, str(status))
+    if status == GoalStatus.SUCCEEDED:
+        rospy.loginfo("Navigation goal reached.")
+        return True
+
+    rospy.logwarn(f"Navigation goal finished with status: {status_text}")
+    return False
 """
 Graph plan ---------------------------------------------------------------------------
 """
@@ -940,46 +1004,21 @@ def use_gripper_exe():
 
 #Think this is good, needs testing
 def move_robot_waypoint0_waypoint1(start_pos, end_pos):
-    # This function executes Move Robot from 1 to 2
-    # This function uses hybrid A-star
+    # Execute the move_robot action through SLAM navigation.
     a=0
     while a<3:
         print("Excuting Mr12")
         time.sleep(1)
         a=a+1
-    print("Computing hybrid A* path")
 
-    if not rospy.core.is_initialized():
-        rospy.init_node('mission_planner', anonymous=False)
+    ensure_ros_node()
 
-    # Read current pose from /odom so planning starts from where the robot is now.
-    try:
-        odom_msg = rospy.wait_for_message("/odom", Odometry, timeout=2.0)
-        q = [
-            odom_msg.pose.pose.orientation.x,
-            odom_msg.pose.pose.orientation.y,
-            odom_msg.pose.pose.orientation.z,
-            odom_msg.pose.pose.orientation.w,
-        ]
-        (_, _, yaw) = tf.transformations.euler_from_quaternion(q)
-        start_pos = [
-            odom_msg.pose.pose.position.x,
-            odom_msg.pose.pose.position.y,
-            yaw,
-        ]
-        rospy.loginfo(f"Using /odom start pose: {start_pos}")
-    except rospy.ROSException:
-        rospy.logwarn("No /odom received within 2s. Falling back to planner start waypoint.")
-
-    p = argparse.ArgumentParser()
-    p.add_argument('-heu', type=int, default=1, help='heuristic type')
-    p.add_argument('-r', action='store_true', help='allow reverse or not')
-    p.add_argument('-e', action='store_true', help='add extra cost or not')
-    p.add_argument('-g', action='store_true', help='show grid or not')
-    args, _ = p.parse_known_args()
-    main_hybrid_a(args.heu,start_pos,end_pos,True,args.e,args.g)
-    print("Executing path following")
-    turtlebot_move()
+    print("Executing SLAM navigation goal with move_base")
+    frame_id = rospy.get_param("~navigation_frame", "map")
+    timeout = rospy.get_param("~navigation_goal_timeout", 180.0)
+    ok = set_navigation_goal(end_pos[0], end_pos[1], end_pos[2], frame_id, timeout)
+    if not ok:
+        raise rospy.ROSException(f"Failed to reach navigation goal: {end_pos}")
     
 
 
@@ -1079,8 +1118,8 @@ if __name__ == '__main__':
         print("************ TTK4192 - Assigment 4 **************************")
         print()
         print("AI planners: GraphPlan")
-        print("Path-finding: Hybrid A-star")
-        print("GNC Controller: PID path-following")
+        print("Navigation: SLAM map + move_base goals")
+        print("GNC Controller: move_base")
         print("Robot: Turtlebot3 waffle-pi")
         print("date: 20.03.23")
         print()
