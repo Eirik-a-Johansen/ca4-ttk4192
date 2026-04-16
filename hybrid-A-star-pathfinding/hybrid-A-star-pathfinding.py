@@ -9,7 +9,7 @@ from matplotlib.patches import Rectangle
 from itertools import product
 import argparse
 from utils.grid import Grid
-from utils.car import SimpleCar
+from utils.car import SimpleCar, State
 from utils.environment import Environment
 from utils.dubins_path import DubinsPath
 from utils.astar import Astar
@@ -26,13 +26,16 @@ from utils.utils import plot_a_car, get_discretized_thetas, round_theta, same_po
 
 class HybridAstar:
     """ Hybrid A* search procedure. """
-    def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1):
+    def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1,
+                 epsilon=8.5, max_iter=5000):
         self.car = car
         self.grid = grid
         self.reverse = reverse
         self.unit_theta = unit_theta
         self.dt = dt
         self.check_dubins = check_dubins
+        self.epsilon = epsilon   # heuristic inflation: >1 trades optimality for speed
+        self.max_iter = max_iter # hard cap on expansions to avoid endless search
 
         self.start = self.car.start_pos
         self.goal = self.car.end_pos
@@ -50,7 +53,8 @@ class HybridAstar:
 
         self.dubins = DubinsPath(self.car)
         self.astar = Astar(self.grid, self.goal[:2])
-        
+        self.astar.precompute()  # one-time backward Dijkstra from goal
+
         self.w1 = 0.95 # weight for astar heuristic
         self.w2 = 0.05 # weight for simple heuristic
         self.w3 = 0.30 # weight for extra cost of steering angle change
@@ -80,15 +84,15 @@ class HybridAstar:
         return abs(self.goal[0]-pos[0]) + abs(self.goal[1]-pos[1])
         
     def astar_heuristic(self, pos):
-        """ Heuristic by standard astar. """
+        """ Heuristic by precomputed cost-to-go (O(1) lookup). """
 
-        result = self.astar.search_path(pos[:2])
+        result = self.astar.lookup(pos[:2])
         if result is None:
-            return self.simple_heuristic(pos[:2])
+            return self.epsilon * self.simple_heuristic(pos[:2])
         h1 = result * self.grid.cell_size
         h2 = self.simple_heuristic(pos[:2])
 
-        return self.w1*h1 + self.w2*h2
+        return self.epsilon * (self.w1*h1 + self.w2*h2)
 
     def get_children(self, node, heu, extra):
         """ Get successors from a state. """
@@ -96,11 +100,10 @@ class HybridAstar:
         children = []
         for m, phi in self.comb:
 
-            # don't immediately reverse on the same arc (would retrace exact path)
-            if node.m and node.phi == phi and node.m*m == -1:
+            # don't immediately reverse on the exact same arc (would retrace)
+            if node.m and node.phi == phi and node.m * m == -1:
                 continue
-            if node.m and node.m == 1 and m == -1:
-                continue
+
             pos = node.pos
             branch = [m, pos[:2]]
 
@@ -109,18 +112,26 @@ class HybridAstar:
                 branch.append(pos[:2])
 
             # check safety of route-----------------------
-            pos1 = node.pos if m == 1 else pos
-            pos2 = pos if m == 1 else node.pos
             if phi == 0:
+                pos1 = node.pos if m == 1 else pos
+                pos2 = pos if m == 1 else node.pos
                 safe = self.dubins.is_straight_route_safe(pos1, pos2)
             else:
-                d, c, r = self.car.get_params(pos1, phi)
-                safe = self.dubins.is_turning_route_safe(pos1, pos2, d, c, r)
+                if m == 1:
+                    # forward: centre and direction come directly from node position
+                    d, c, r = self.car.get_params(node.pos, phi)
+                    safe = self.dubins.is_turning_route_safe(node.pos, pos, d, c, r)
+                else:
+                    # reverse: same geometric centre as the equivalent forward arc,
+                    # but the effective turning direction is flipped
+                    _, c, r = self.car.get_params(node.pos, phi)
+                    d = -1 if phi > 0 else 1
+                    safe = self.dubins.is_turning_route_safe(node.pos, pos, d, c, r)
             # --------------------------------------------
-            
+
             if not safe:
                 continue
-            
+
             child = self.construct_node(pos)
             child.phi = phi
             child.m = m
@@ -128,21 +139,22 @@ class HybridAstar:
             child.g = node.g + self.arc
             child.g_ = node.g_ + self.arc
 
+            # direction-change penalty always applied (not just with --extra)
+            # so the planner only switches gears when it genuinely helps
+            if node.m and node.m != m:
+                child.g += self.w5 * self.arc
+
             if extra:
                 # extra cost for changing steering angle
                 if phi != node.phi:
                     child.g += self.w3 * self.arc
-                
+
                 # extra cost for turning
                 if phi != 0:
                     child.g += self.w4 * self.arc
-                
+
                 # extra cost for reverse
                 if m == -1:
-                    child.g += self.w5 * self.arc
-
-                # extra cost for direction change (forward <-> reverse)
-                if node.m and node.m != m:
                     child.g += self.w5 * self.arc
 
             if heu == 0:
@@ -175,6 +187,78 @@ class HybridAstar:
         
         return best, cost, d_route
     
+    def smooth_path(self, path, window_size=5, method='moving_average'):
+        """ Smooth the path using different smoothing methods. """
+        if len(path) < window_size:
+            return path
+        
+        if method == 'moving_average':
+            return self._smooth_moving_average(path, window_size)
+        elif method == 'weighted_average':
+            return self._smooth_weighted_average(path, window_size)
+        else:
+            return path
+    
+    def _smooth_moving_average(self, path, window_size=5):
+        """ Smooth the path using simple moving average filter. """
+        smoothed_path = []
+        
+        # Keep the first point unchanged
+        smoothed_path.append(path[0])
+        
+        # Apply moving average to intermediate points
+        for i in range(1, len(path) - 1):
+            start_idx = max(0, i - window_size // 2)
+            end_idx = min(len(path), i + window_size // 2 + 1)
+            
+            # Calculate average position
+            avg_x = sum(p.pos[0] for p in path[start_idx:end_idx]) / (end_idx - start_idx)
+            avg_y = sum(p.pos[1] for p in path[start_idx:end_idx]) / (end_idx - start_idx)
+            avg_theta = path[i].pos[2]  # Keep original orientation
+            
+            # Create new car state with smoothed position
+            smoothed_state = State([avg_x, avg_y, avg_theta], path[i].model)
+            smoothed_path.append(smoothed_state)
+        
+        # Keep the last point unchanged
+        smoothed_path.append(path[-1])
+        
+        return smoothed_path
+    
+    def _smooth_weighted_average(self, path, window_size=5):
+        """ Smooth the path using weighted moving average (more weight to center). """
+        smoothed_path = []
+        
+        # Keep the first point unchanged
+        smoothed_path.append(path[0])
+        
+        # Create weights (gaussian-like distribution)
+        weights = np.exp(-np.linspace(-2, 2, window_size)**2)
+        weights = weights / np.sum(weights)
+        
+        # Apply weighted average to intermediate points
+        for i in range(1, len(path) - 1):
+            start_idx = max(0, i - window_size // 2)
+            end_idx = min(len(path), i + window_size // 2 + 1)
+            
+            # Get points in window
+            window_points = path[start_idx:end_idx]
+            window_weights = weights[len(weights)//2 - (i - start_idx): len(weights)//2 + (end_idx - i)]
+            
+            # Calculate weighted average position
+            avg_x = sum(p.pos[0] * w for p, w in zip(window_points, window_weights)) / sum(window_weights)
+            avg_y = sum(p.pos[1] * w for p, w in zip(window_points, window_weights)) / sum(window_weights)
+            avg_theta = path[i].pos[2]  # Keep original orientation
+            
+            # Create new car state with smoothed position
+            smoothed_state = State([avg_x, avg_y, avg_theta], path[i].model)
+            smoothed_path.append(smoothed_state)
+        
+        # Keep the last point unchanged
+        smoothed_path.append(path[-1])
+        
+        return smoothed_path
+    
     def backtracking(self, node):
         """ Backtracking the path. """
 
@@ -205,6 +289,9 @@ class HybridAstar:
         count = 0
         while open_:
             count += 1
+            if count > self.max_iter:
+                print('Max iterations ({}) reached.'.format(self.max_iter))
+                break
             best = min(open_, key=lambda x: x.f)
 
             open_.remove(best)
@@ -317,7 +404,7 @@ def plot_search_space(env, car, grid, closed_, grid_on):
     plt.show()
 
 
-def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
+def main_hybrid_a(heu, start_pos, end_pos, reverse, extra, grid_on, smooth=True, smooth_method='weighted_average'):
 
     tc = map_grid()
     env = Environment(tc.obs)
@@ -338,6 +425,12 @@ def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
         return
     # a post-processing is required to have path list
     path = path[::5] + [path[-1]]
+    
+    # Apply path smoothing
+    if smooth:
+        path = hastar.smooth_path(path, method=smooth_method)
+        print('Path smoothed with {} filter'.format(smooth_method))
+    
     branches = []
     bcolors = []
     for node in closed_:
@@ -483,29 +576,69 @@ class Node:
         return hash((self.grid_pos))
     
 class map_grid:
-    """ Here the obstacles are defined for a 20x20 map. """
+    """Obstacle map matching the Gazebo world (5.21m x 2.55m)."""
+
     def __init__(self):
 
-        self.start_pos2 = [4, 4, 0]  # default values
-        self.end_pos2 = [4, 8, -pi]  # default
+        # Start and goal (you can change these as needed)
+        self.start_pos2 = [4, 4, 0]
+        self.end_pos2   = [4, 8, -pi]
+
+        # Helper: convert from (center_x, center_y, width, height)
+        # to (x_min, y_min, width, height)
+        def box_to_rect(cx, cy, w, h):
+            return [cx - w/2, cy - h/2, w, h]
+
         self.obs = [
-            #x,y,x-bredde,y-høyde
-        
-            [0.0, 0.0,   3.3,  0.05],
-            [3.275, 0.0, 0.05, 0.2],
-            [3.3, 0.175, 1.91, 0.05],
-            [0.0, 2.725, 5.21, 0.05],
-            [0.0, 0.0,   0.05, 1.0],
-            [0.0, 0.975, 0.5,  0.05],
-            [0.475, 1.0, 0.05, 0.2],
-            [0.0, 1.175, 0.5,  0.05],
-            [0.0, 1.2,   0.05, 1.55],
-            [5.185, 0.2, 0.05, 2.55],
-            [1.2, 1.65, 0.2, 0.4],
-            [2.3, 1.65, 0.4, 0.4],
-            [3.66, 1.8, 0.4, 0.2],
-            [1.35, 0.6, 0.5, 0.2],
-            [3.16, 0.8, 0.5, 0.2],
+
+            # ==================== OUTER WALLS ====================
+
+            # South wall left
+            box_to_rect(1.65, 0.0, 3.3, 0.05),
+
+            # South wall step (vertical)
+            box_to_rect(3.3, 0.1, 0.05, 0.2),
+
+            # South wall right
+            box_to_rect(4.255, 0.2, 1.91, 0.05),
+
+            # North wall
+            box_to_rect(2.605, 2.75, 5.21, 0.05),
+
+            # West wall bottom
+            box_to_rect(0.0, 0.5, 0.05, 1.0),
+
+            # West notch bottom
+            box_to_rect(0.25, 1.0, 0.5, 0.05),
+
+            # West notch right
+            box_to_rect(0.5, 1.1, 0.05, 0.2),
+
+            # West notch top
+            box_to_rect(0.25, 1.2, 0.5, 0.05),
+
+            # West wall top
+            box_to_rect(0.0, 1.975, 0.05, 1.55),
+
+            # East wall
+            box_to_rect(5.21, 1.475, 0.05, 2.55),
+
+            # ==================== INTERNAL OBSTACLES ====================
+
+            # Obstacle 1
+            box_to_rect(1.3, 1.85, 0.2, 0.4),
+
+            # Obstacle 2
+            box_to_rect(2.5, 1.85, 0.4, 0.4),
+
+            # Obstacle 3
+            box_to_rect(3.86, 1.9, 0.4, 0.2),
+
+            # Obstacle 4
+            box_to_rect(1.6, 0.7, 0.5, 0.2),
+
+            # Obstacle 5
+            box_to_rect(3.41, 0.9, 0.5, 0.2),
         ]
 
 if __name__ == '__main__':
@@ -515,11 +648,13 @@ if __name__ == '__main__':
     p.add_argument('-r', action='store_true', help='allow reverse or not')
     p.add_argument('-e', action='store_true', help='add extra cost or not')
     p.add_argument('-g', action='store_true', help='show grid or not')
+    p.add_argument('-s', action='store_true', help='enable path smoothing')
+    p.add_argument('-sm', type=str, default='weighted_average', choices=['moving_average', 'weighted_average'], help='smoothing method')
     args = p.parse_args()
 
     WP_MAP = {
         'WP0': [0.6,  0.3,  0],   # valid as-is
-        'WP1': [1.6,  0.2,  np.pi/2],   # valid as-is
+        'WP1': [1.6,  0.3,  np.pi/2],   # valid as-is
         'WP2': [2.9,  1.3,  -np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
         'WP3': [3.36,  2.7,  np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
         'WP4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
@@ -535,5 +670,5 @@ if __name__ == '__main__':
         start_pos  = WP_MAP[start_name]
         end_pos    = WP_MAP[end_name]
         print(f"\n--- Leg {i+1}: {start_name} -> {end_name} ---")
-        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g) #args.r
+        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g, smooth=args.s, smooth_method=args.sm)
         print(f"Leg {i+1} done.")

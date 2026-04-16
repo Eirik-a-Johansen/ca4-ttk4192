@@ -1,3 +1,4 @@
+import heapq
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Rectangle
@@ -55,7 +56,30 @@ class Astar:
         self.grid = grid
         self.start = self.grid.to_cell_id(start)
         self.table = []
-    
+        self.cost_map = {}  # filled by precompute()
+
+    def precompute(self):
+        """Backward Dijkstra from start (= hybrid-A* goal) to every reachable cell.
+        Run once at initialisation; heuristic lookups are then O(1)."""
+        start_key = tuple(self.start)
+        self.cost_map = {start_key: 0}
+        heap = [(0, self.start)]
+
+        while heap:
+            g, cell = heapq.heappop(heap)
+            if g > self.cost_map.get(tuple(cell), float('inf')):
+                continue
+            for nb in self.grid.get_neighbors(cell):
+                nb_key = tuple(nb)
+                new_g = g + 1
+                if new_g < self.cost_map.get(nb_key, float('inf')):
+                    self.cost_map[nb_key] = new_g
+                    heapq.heappush(heap, (new_g, nb))
+
+    def lookup(self, pos):
+        """O(1) cost-to-go lookup after precompute(). Returns None if unreachable."""
+        return self.cost_map.get(tuple(self.grid.to_cell_id(pos)))
+
     def heuristic(self, p1, p2):
         """ Simple Manhattan distance  heuristic. """
 
