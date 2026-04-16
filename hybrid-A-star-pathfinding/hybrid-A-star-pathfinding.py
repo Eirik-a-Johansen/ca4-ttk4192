@@ -12,6 +12,7 @@ from utils.grid import Grid
 from utils.car import SimpleCar, State
 from utils.environment import Environment
 from utils.dubins_path import DubinsPath
+from utils.spline_path import SplinePath
 from utils.astar import Astar
 from utils.utils import plot_a_car, get_discretized_thetas, round_theta, same_point
 
@@ -27,7 +28,7 @@ from utils.utils import plot_a_car, get_discretized_thetas, round_theta, same_po
 class HybridAstar:
     """ Hybrid A* search procedure. """
     def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1,
-                 epsilon=8.5, max_iter=5000):
+                 epsilon=8.5, max_iter=5000, use_spline=False):
         self.car = car
         self.grid = grid
         self.reverse = reverse
@@ -51,7 +52,12 @@ class HybridAstar:
         else:
             self.comb = list(product([1], self.phil))
 
-        self.dubins = DubinsPath(self.car)
+        if use_spline:
+            self.dubins = SplinePath(self.car)
+            self.connector_name = 'Spline'
+        else:
+            self.dubins = DubinsPath(self.car)
+            self.connector_name = 'Dubins'
         self.astar = Astar(self.grid, self.goal[:2])
         self.astar.precompute()  # one-time backward Dijkstra from goal
 
@@ -316,7 +322,7 @@ class HybridAstar:
                     route = self.backtracking(best) + d_route
                     path = self.car.get_path(self.start, route)
                     cost += best.g_
-                    print('Shortest path (Dubins): {}'.format(round(cost, 2)))
+                    print('Shortest path ({}): {}'.format(self.connector_name, round(cost, 2)))
                     print('Total iteration:', count)
 
                     return path, closed_
@@ -404,14 +410,15 @@ def plot_search_space(env, car, grid, closed_, grid_on):
     plt.show()
 
 
-def main_hybrid_a(heu, start_pos, end_pos, reverse, extra, grid_on, smooth=True, smooth_method='weighted_average'):
+def main_hybrid_a(heu, start_pos, end_pos, reverse, extra, grid_on, smooth=True,
+                  smooth_method='weighted_average', use_spline=False):
 
     tc = map_grid()
     env = Environment(tc.obs)
     car = SimpleCar(env, start_pos, end_pos, l=0.19)
     grid = Grid(env)
 
-    hastar = HybridAstar(car, grid, reverse)
+    hastar = HybridAstar(car, grid, reverse, use_spline=use_spline)
 
     t = time.time()
     path, closed_ = hastar.search_path(heu, extra)
@@ -650,6 +657,7 @@ if __name__ == '__main__':
     p.add_argument('-g', action='store_true', help='show grid or not')
     p.add_argument('-s', action='store_true', help='enable path smoothing')
     p.add_argument('-sm', type=str, default='weighted_average', choices=['moving_average', 'weighted_average'], help='smoothing method')
+    p.add_argument('--spline', action='store_true', help='use cubic Hermite spline connector instead of Dubins path')
     args = p.parse_args()
 
     WP_MAP = {
@@ -670,5 +678,6 @@ if __name__ == '__main__':
         start_pos  = WP_MAP[start_name]
         end_pos    = WP_MAP[end_name]
         print(f"\n--- Leg {i+1}: {start_name} -> {end_name} ---")
-        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g, smooth=args.s, smooth_method=args.sm)
+        main_hybrid_a(args.heu, start_pos, end_pos, args.r, args.e, args.g,
+                      smooth=args.s, smooth_method=args.sm, use_spline=args.spline)
         print(f"Leg {i+1} done.")
