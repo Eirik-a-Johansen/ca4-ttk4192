@@ -59,11 +59,12 @@ WAYPOINTS = [[0.3,0.3,0],[1.6,0.3,0],[2.9,  1.3,0], [3.36, 2.7,0], [5.15, 0.25,0
 WP_MAP = {
     'waypoint0': [0.3,  0.3,  0],   # valid as-is
     'waypoint1': [1.6,  0.3,  0*np.pi/2],   # valid as-is
-    'waypoint2': [2.9,  1.3,  -0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
-    'waypoint3': [3.36,  2.7,  0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint2': [3.41,  1.3,  -np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint3': [3.30,  2.4,  np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
     'waypoint4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
-    'waypoint5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
-    'waypoint6': [4.3,  2.2,  0*np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
+    'waypoint5': [0.8, 2.4,  np.pi/2],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
+    'waypoint6': [3.86,  1.5,  np.pi/2],
+    'safepoint': [2.5, 0.8, 0]   
 }
 
 NAVIGATION_STATUS_TEXT = {
@@ -78,6 +79,9 @@ NAVIGATION_STATUS_TEXT = {
     GoalStatus.RECALLED: "recalled",
     GoalStatus.LOST: "lost",
 }
+
+MAX_NAVIGATION_RETRIES = 1
+MAX_SAFEPOINT_RECOVERIES = 1
 
 def ensure_ros_node(name='mission_planner'):
     if not rospy.core.is_initialized():
@@ -94,7 +98,7 @@ def set_navigation_goal(x, y, yaw=0.0, frame_id="map", timeout=180.0):
     rospy.loginfo("Waiting for move_base action server...")
     if not client.wait_for_server(rospy.Duration(30.0)):
         rospy.logerr("move_base action server is not available. Start turtlebot3_slam.launch or another launch file that brings up move_base.")
-        return False
+        return GoalStatus.LOST
 
     goal = MoveBaseGoal()
     goal.target_pose.header.frame_id = frame_id
@@ -116,16 +120,58 @@ def set_navigation_goal(x, y, yaw=0.0, frame_id="map", timeout=180.0):
     if not finished:
         rospy.logwarn(f"Navigation goal timed out after {timeout:.1f}s; cancelling goal.")
         client.cancel_goal()
-        return False
+        return GoalStatus.LOST
 
     status = client.get_state()
     status_text = NAVIGATION_STATUS_TEXT.get(status, str(status))
     if status == GoalStatus.SUCCEEDED:
         rospy.loginfo("Navigation goal reached.")
-        return True
+        return status
 
     rospy.logwarn(f"Navigation goal finished with status: {status_text}")
-    return False
+    return status
+
+def get_action_waypoint(action):
+    """Return the waypoint an action depends on, when it is encoded in args."""
+    action_name = action.get('action')
+    action_args = action.get('args', [])
+
+    if action_name == "move_robot" and len(action_args) > 2:
+        return action_args[2]
+
+    for arg in action_args[1:]:
+        if arg.startswith("waypoint"):
+            return arg
+
+    return None
+
+def defer_waypoint_actions(plan, move_index, waypoint):
+    """
+    Move a failed navigation action and the immediately following actions at
+    that destination waypoint to the back of the remaining plan.
+    """
+    deferred = [plan.pop(move_index)]
+
+    while move_index < len(plan):
+        next_action = plan[move_index]
+        if next_action.get('action') == "move_robot":
+            break
+        if get_action_waypoint(next_action) != waypoint:
+            break
+        deferred.append(plan.pop(move_index))
+
+    for action in deferred:
+        action['_navigation_retries'] = action.get('_navigation_retries', 0) + 1
+
+    plan.extend(deferred)
+    return deferred
+
+def get_safepoint_waypoint(failed_wp):
+    if failed_wp == "safepoint":
+        return None
+    if "safepoint" not in WP_MAP:
+        return None
+    return "safepoint"
 """
 Graph plan ---------------------------------------------------------------------------
 """
@@ -1003,7 +1049,7 @@ def use_gripper_exe():
     rospy.sleep(1)
 
 #Think this is good, needs testing
-def move_robot_waypoint0_waypoint1(start_pos, end_pos):
+def move_robot_from_to(start_pos, end_pos):
     # Execute the move_robot action through SLAM navigation.
     a=0
     while a<3:
@@ -1016,9 +1062,11 @@ def move_robot_waypoint0_waypoint1(start_pos, end_pos):
     print("Executing SLAM navigation goal with move_base")
     frame_id = rospy.get_param("~navigation_frame", "map")
     timeout = rospy.get_param("~navigation_goal_timeout", 180.0)
-    ok = set_navigation_goal(end_pos[0], end_pos[1], end_pos[2], frame_id, timeout)
-    if not ok:
-        raise rospy.ROSException(f"Failed to reach navigation goal: {end_pos}")
+    status = set_navigation_goal(end_pos[0], end_pos[1], end_pos[2], frame_id, timeout)
+    if status != GoalStatus.SUCCEEDED:
+        status_text = NAVIGATION_STATUS_TEXT.get(status, str(status))
+        rospy.logwarn(f"Failed to reach navigation goal {end_pos}: {status_text}")
+    return status
     
 
 
@@ -1147,21 +1195,65 @@ if __name__ == '__main__':
         battery = 100
         task_finished = 0
         task_total = len(plan)
+        max_navigation_retries = rospy.get_param("~max_navigation_retries", MAX_NAVIGATION_RETRIES)
+        max_safepoint_recoveries = rospy.get_param("~max_safepoint_recoveries", MAX_SAFEPOINT_RECOVERIES)
         i_ini = 0
 
-        while i_ini < task_total:
+        while i_ini < len(plan):
             action = plan[i_ini]
             action_name = action['action']
             action_args = action['args']
 
-            print(f"\n[Mission] Step {i_ini+1}/{task_total}: {action_name} {' '.join(action_args)}")
+            print(f"\n[Mission] Step {i_ini+1}/{len(plan)}: {action_name} {' '.join(action_args)}")
 
             if action_name == "move_robot":
                 # args: [robot, from_wp, to_wp, route]
                 from_wp = action_args[1]
                 to_wp   = action_args[2]
                 print(f"[Mission] Moving robot from {from_wp} to {to_wp}")
-                move_robot_waypoint0_waypoint1(WP_MAP[from_wp],WP_MAP[to_wp])  # replace with your move function
+                navigation_status = move_robot_from_to(WP_MAP[from_wp],WP_MAP[to_wp])
+                if navigation_status == GoalStatus.ABORTED:
+                    retry_count = action.get('_navigation_retries', 0)
+                    if retry_count < max_navigation_retries:
+                        deferred = defer_waypoint_actions(plan, i_ini, to_wp)
+                        deferred_names = [
+                            f"{a['action']} {' '.join(a['args'])}" for a in deferred
+                        ]
+                        print(f"[Mission] Navigation to {to_wp} aborted. Deferring dependent waypoint block to the back of the plan:")
+                        for deferred_name in deferred_names:
+                            print(f"  - {deferred_name}")
+                        print(f"[Mission] Will retry {to_wp} after the remaining steps.")
+                        continue
+
+                    safepoint_count = action.get('_safepoint_recoveries', 0)
+                    if safepoint_count < max_safepoint_recoveries:
+                        safepoint_wp = get_safepoint_waypoint(to_wp)
+                        if safepoint_wp is None:
+                            raise rospy.ROSException(
+                                f"Navigation to {to_wp} aborted and no safepoint recovery waypoint is available."
+                            )
+
+                        print(f"[Mission] Navigation to {to_wp} aborted after retry. Moving to {safepoint_wp}, then retrying {to_wp}.")
+                        safepoint_status = move_robot_from_to(WP_MAP[from_wp], WP_MAP[safepoint_wp])
+                        if safepoint_status != GoalStatus.SUCCEEDED:
+                            status_text = NAVIGATION_STATUS_TEXT.get(safepoint_status, str(safepoint_status))
+                            raise rospy.ROSException(
+                                f"Safepoint recovery waypoint {safepoint_wp} failed with status: {status_text}"
+                            )
+
+                        action['_safepoint_recoveries'] = safepoint_count + 1
+                        action_args[1] = safepoint_wp
+                        continue
+
+                    raise rospy.ROSException(
+                        f"Navigation to {to_wp} aborted after {retry_count} retries and {action.get('_safepoint_recoveries', 0)} safepoint recoveries."
+                    )
+
+                if navigation_status != GoalStatus.SUCCEEDED:
+                    status_text = NAVIGATION_STATUS_TEXT.get(navigation_status, str(navigation_status))
+                    raise rospy.ROSException(
+                        f"Navigation to {to_wp} failed with status: {status_text}"
+                    )
                 # WAYPOINTS=[WP_MAP[from_wp],WP_MAP[to_wp]]
                 # turtlebot_move()
                 time.sleep(1)
