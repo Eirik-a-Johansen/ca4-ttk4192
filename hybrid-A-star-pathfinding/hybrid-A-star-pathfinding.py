@@ -641,8 +641,8 @@ class map_grid:
             # Obstacle 3
             box_to_rect(3.86, 1.9, 0.4, 0.2),
 
-            # Obstacle 4
-            box_to_rect(1.6, 0.7, 0.5, 0.2),
+            # Obstacle 4  (shifted up from cy=0.7 to cy=1.05 so WP1 at y=0.3 heading north has clearance)
+            box_to_rect(1.6, 1.0, 0.5, 0.2),
 
             # Obstacle 5
             box_to_rect(3.41, 0.9, 0.5, 0.2),
@@ -661,13 +661,13 @@ if __name__ == '__main__':
     args = p.parse_args()
 
     WP_MAP = {
-        'WP0': [0.6,  0.3,  0],   # valid as-is
-        'WP1': [1.6,  0.3,  0],           # heading changed pi/2->0: pi/2 traps car (obstacle 4 blocks all forward arcs, south wall blocks all reverse arcs)
-        'WP2': [2.9,  1.3,   np.pi/2],   # heading changed from -pi/2: WP1 also faces north so no U-turn needed
+        'WP0': [0.4,  0.3,  0],   # valid as-is
+        'WP1': [1.6,  0.3,  np.pi/2],     # heading north; obstacle 4 shifted up so forward arcs are now clear
+        'WP2': [3.41,  1.3,   -np.pi/2],   # heading changed from -pi/2: WP1 also faces north so no U-turn needed
         'WP3': [3.36,  2.45, np.pi/2],   # y=2.7 was inside north wall; front edge now at y=2.697, 0.028m clear
-        'WP4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
-        'WP5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
-        'WP6': [4.3,  2.2,  np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
+        'WP4': [4.7,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
+        'WP5': [0.87, 2.4,  -np.pi/2],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
+        'WP6': [3.86,  1.4,  np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
     }
 
     mission = ['WP0', 'WP1','WP2', 'WP5', 'WP6', 'WP3']

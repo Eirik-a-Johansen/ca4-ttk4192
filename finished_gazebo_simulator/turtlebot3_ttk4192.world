@@ -1,0 +1,375 @@
+<sdf version='1.4'>
+  <world name='turtlebot3_ttk4192'>
+
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <physics type="ode">
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>150</iters>
+          <precon_iters>0</precon_iters>
+          <sor>1.400000</sor>
+          <use_dynamic_moi_rescaling>1</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>0.00001</cfm>
+          <erp>0.2</erp>
+          <contact_max_correcting_vel>2000.000000</contact_max_correcting_vel>
+          <contact_surface_layer>0.01000</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+
+    <!-- ==================== OUTER WALLS ====================
+         Map: 5.21m (x) wide, 2.55m (y) tall
+         Origin (0,0) = bottom-left
+    -->
+
+    <!-- SOUTH WALL: x=0 to x=3.3, at y=0 -->
+    <model name="wall_south_left">
+      <static>true</static>
+      <pose>1.65 0.0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>3.3 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>3.3 0.05 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- SOUTH WALL STEP: vertical piece at x=3.3 going up to y=0.2 -->
+    <model name="wall_south_step_vertical">
+      <static>true</static>
+      <pose>3.3 0.1 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.05 0.2 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 0.2 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- SOUTH WALL: right segment x=3.3 to x=5.21, at y=0.2 -->
+    <model name="wall_south_right">
+      <static>true</static>
+      <pose>4.255 0.2 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>1.91 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.91 0.05 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- NORTH WALL: full width at y=2.55 -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>2.605 2.75 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>5.21 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>5.21 0.05 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WEST WALL: bottom segment y=0 to y=1.0 -->
+    <model name="wall_west_bottom">
+      <static>true</static>
+      <pose>0.0 0.5 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.05 1.0 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 1.0 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WEST WALL NOTCH: bottom horizontal at y=1.0, extends 0.5m inward -->
+    <model name="wall_west_notch_bottom">
+      <static>true</static>
+      <pose>0.25 1.0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.5 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.5 0.05 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WEST WALL NOTCH: right vertical at x=0.5, y=1.0 to y=1.2 -->
+    <model name="wall_west_notch_right">
+      <static>true</static>
+      <pose>0.5 1.1 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.05 0.2 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 0.2 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WEST WALL NOTCH: top horizontal at y=1.2 back to wall -->
+    <model name="wall_west_notch_top">
+      <static>true</static>
+      <pose>0.25 1.2 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.5 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.5 0.05 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- WEST WALL: top segment y=1.2 to y=2.55 -->
+    <model name="wall_west_top">
+      <static>true</static>
+      <pose>0.0 1.975 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.05 1.55 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 1.55 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- EAST WALL: full height -->
+    <model name="wall_east">
+      <static>true</static>
+      <pose>5.21 1.475 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.05 2.55 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.05 2.55 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==================== OBSTACLES ====================
+         From Figure 7:
+         obstacle_1: 0.2x0.4, at x=1.2 from left  -> center x=1.3, y =1.85 
+         obstacle_2: 0.4x0.4, center of map       -> center x=2.5, y=1.85
+         obstacle_3: 0.4x0.2, top-right near wp6  -> center x=3.86, y=1.9
+         obstacle_4: 0.5x0.2, bottom left         -> center x=1.6, y = 0.7
+         obstacle_5: 0.5x0.2, bottom right         -> center x=3.41, y = 0.9
+
+    -->
+
+    <!-- OBSTACLE 1: 0.15 x 0.35 -->
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>1.3 1.85 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.15 0.35 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.15 0.35 0.5</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OBSTACLE 2: 0.35 x 0.35 -->
+    <model name="obstacle_2">
+      <static>true</static>
+      <pose>2.5 1.85 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.35 0.35 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.35 0.35 0.5</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OBSTACLE 3: 0.35 x 0.15, equipment block near wp6 -->
+    <model name="obstacle_3">
+      <static>true</static>
+      <pose>3.86 1.9 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.35 0.15 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.35 0.15 0.5</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OBSTACLE 4: 0.45 x 0.15, bottom left (shifted up from y=0.7 to y=0.8 for WP1 clearance) -->
+    <model name="obstacle_4">
+      <static>true</static>
+      <pose>1.6 0.8 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.45 0.15 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.45 0.15 0.5</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OBSTACLE 5: 0.45 x 0.15, bottom right -->
+    <model name="obstacle_5">
+      <static>true</static>
+      <pose>3.41 0.9 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.45 0.15 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.45 0.15 0.5</size></box></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==================== WAYPOINT MARKERS ====================
+         Positions match WP_MAP in hybrid-A-star-pathfinding.py:
+         wp0 (0.6,  0.3)  - GREEN
+         wp1 (1.6,  0.3)  - RED
+         wp2 (3.41, 1.3)  - RED
+         wp3 (3.36, 2.45) - GREEN
+         wp4 (4.5,  0.5)  - GREEN
+         wp5 (0.87, 2.4)  - BLUE
+         wp6 (4.3,  2.2)  - BLUE
+    -->
+
+    <model name="wp0_marker">
+        <static>true</static>
+        <pose>0.4 0.3 0.01 0 0 0</pose>
+        <link name="link">
+            <visual name="visual">
+            <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+            <material><ambient>0 0.8 0.4 1</ambient></material>
+            </visual>
+        </link>
+    </model>
+
+    <model name="wp1_marker">
+        <static>true</static>
+        <pose>1.6 0.3 0.01 0 0 0</pose>
+        <link name="link">
+            <visual name="visual">
+            <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+            <material><ambient>0.9 0.2 0 1</ambient></material>
+            </visual>
+        </link>
+    </model>
+
+    <model name="wp2_marker">
+        <static>true</static>
+        <pose>3.41 1.3 0.01 0 0 0</pose>
+        <link name="link">
+            <visual name="visual">
+            <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+            <material><ambient>0.9 0.2 0 1</ambient></material>
+            </visual>
+        </link>
+    </model>
+
+    <model name="wp3_marker">
+    <static>true</static>
+    <pose>3.36 2.45 0.01 0 0 0</pose>
+    <link name="link">
+        <visual name="visual">
+        <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+        <material><ambient>0 0.8 0.4 1</ambient></material>
+        </visual>
+    </link>
+    </model>
+
+    <model name="wp4_marker">
+        <static>true</static>
+        <pose>4.7 0.5 0.01 0 0 0</pose>
+        <link name="link">
+            <visual name="visual">
+            <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+            <material><ambient>0 0.8 0.4 1</ambient></material>
+            </visual>
+        </link>
+    </model>
+
+    <model name="wp5_marker">
+    <static>true</static>
+    <pose>0.87 2.4 0.01 0 0 0</pose>
+    <link name="link">
+        <visual name="visual">
+        <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+        <material><ambient>0 0.2 0.9 1</ambient></material>
+        </visual>
+    </link>
+    </model>
+
+    <model name="wp6_marker">
+    <static>true</static>
+    <pose>3.86 1.4 0.01 0 0 0</pose>
+    <link name="link">
+        <visual name="visual">
+        <geometry><cylinder><radius>0.06</radius><length>0.02</length></cylinder></geometry>
+        <material><ambient>0 0.2 0.9 1</ambient></material>
+        </visual>
+    </link>
+    </model>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <gui fullscreen='0'>
+      <camera name='user_camera'>
+        <pose>2.605 1.275 12.0 0 1.5708 0</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+  </world>
+</sdf>
