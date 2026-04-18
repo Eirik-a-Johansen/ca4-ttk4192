@@ -182,7 +182,7 @@ def run_stp_planner(domain_file, problem_file):
     plan_file      = os.path.join(planner_dir, "tmp_sas_plan.1")
  
     # Mimic what 'source activate' does — prepend venv bin to PATH
-    venv_bin = "/home/ttk4192/catkin_ws/src/temporal-planning-main/bin"
+    venv_bin = "/home/ttk4192/catkin_ws/src/temporal-planning-main/venv/bin"
     env = os.environ.copy()
     env["PATH"] = venv_bin + ":" + env["PATH"]
     env["VIRTUAL_ENV"] = "/home/ttk4192/catkin_ws/src/temporal-planning-main"
