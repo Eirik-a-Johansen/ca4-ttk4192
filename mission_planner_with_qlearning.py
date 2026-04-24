@@ -1,0 +1,1536 @@
+#!/usr/bin/env python3
+import rospy
+import os
+import tf
+import subprocess
+import numpy as np
+import matplotlib.pyplot as plt
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from math import pi, sqrt, atan2, tan
+from os import system, name
+import time
+import re
+import fileinput
+import sys
+import argparse
+import random
+import matplotlib.animation as animation
+from datetime import datetime
+from matplotlib.collections import PatchCollection, LineCollection
+from matplotlib.patches import Rectangle
+from itertools import product
+from utils.astar import Astar
+from utils.utils import plot_a_car, get_discretized_thetas, round_theta, same_point
+import cv2
+from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+import shutil
+import copy
+import moveit_commander
+from utils.grid import Grid
+from utils.car import SimpleCar
+from utils.environment import Environment
+from utils.dubins_path import DubinsPath
+import numpy as np
+import itertools
+# Import here the packages used in your codes
+
+""" ----------------------------------------------------------------------------------
+Mission planner for Autonomos robots: TTK4192,NTNU. 
+Date:20.03.23
+characteristics: AI planning,GNC, hybrid A*, ROS.
+robot: Turtlebot3
+version: 1.1
+""" 
+
+# 1. Make it possible to run the plan.py file in this folder
+# 2. Read the plan
+# 3. Parse the plan
+# 4. Send commands to GNC, like State machine 
+
+
+# 1) Program here your AI planner 
+global WAYPOINTS
+WAYPOINTS = [[0.3,0.3,0],[1.6,0.3,0],[2.9,  1.3,0], [3.36, 2.7,0], [5.15, 0.25,0], [0.87, 2.56,0], [3.86, 1.8,0]]
+
+WP_MAP = {
+    'waypoint0': [0.3,  0.3,  0],   # valid as-is
+    'waypoint1': [1.6,  0.3,  0*np.pi/2],   # valid as-is
+    'waypoint2': [2.9,  1.3,  -0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint3': [3.36,  2.7,  0*np.pi/2],   # was [3.41,1.0]: inside box obstacle at x=3.06-3.76, y=0.7-1.1
+    'waypoint4': [4.5,  0.5,  0],   # was [5.15,0.25]: too close to right wall and floor step
+    'waypoint5': [0.87, 2.4,  0],   # was [0.87,2.56]: car top edge clipped top-wall safe zone
+    'waypoint6': [4.3,  2.2,  0*np.pi/2],   # was [3.86,1.8]: inside box obstacle at x=3.56-4.16, y=1.7-2.1
+}
+
+"""
+--------------------------Q-learning------------------------------
+"""
+# ------------------------------------------------------------------
+# Q-learning high-level planner.
+# Drop-in replacement for run_stp_planner(): returns the same list of
+# dicts that parse_plan() produces, so the existing mission loop below
+# consumes its output without modification.
+# ------------------------------------------------------------------
+
+
+VALVE_WAYPOINT    = {0: 'waypoint1', 1: 'waypoint2'}
+PUMP_WAYPOINT     = {0: 'waypoint5', 1: 'waypoint6'}
+CHARGER_WAYPOINTS = {'waypoint0', 'waypoint3', 'waypoint4'}
+
+
+class QLearningPlanner:
+    def __init__(self, waypoints, wp_map, goal_waypoint,
+                 p_fail=0.1, gamma=0.95, maximum_charge=10):
+        self.waypoints      = waypoints
+        self.wp_map         = wp_map
+        self.goal_waypoint  = goal_waypoint
+        self.p_fail         = p_fail
+        self.gamma          = gamma
+        self.maximum_charge = maximum_charge
+        self.actions        = self._build_actions()
+        self.states         = self._build_states()
+        self.state_to_index = {state: index for index, state in enumerate(self.states)}
+        self.Q              = np.zeros((len(self.states), len(self.actions)))
+
+    # --- enumeration -------------------------------------------------------
+
+    def _build_states(self):
+        return list(itertools.product(
+            self.waypoints, [0, 1], [0, 1], [0, 1], [0, 1],
+            range(self.maximum_charge + 1)))
+
+    def _build_actions(self):
+        return [('move', waypoint) for waypoint in self.waypoints] + [
+            ('take_picture', None),
+            ('check_valve',  None),
+            ('charge',       None),
+        ]
+
+    # --- goal / potential --------------------------------------------------
+
+    def potential(self, state):
+        _, valve0, valve1, pump0, pump1, _ = state
+        return 20.0 * (valve0 + valve1 + pump0 + pump1)
+
+    def is_goal(self, state):
+        waypoint_current, valve0, valve1, pump0, pump1, _ = state
+        return bool(valve0 and valve1 and pump0 and pump1) \
+               and waypoint_current == self.goal_waypoint
+
+    # --- geometry ----------------------------------------------------------
+
+    def euclidean(self, waypoint_from, waypoint_to):
+        x_from, y_from = self.wp_map[waypoint_from][0], self.wp_map[waypoint_from][1]
+        x_to,   y_to   = self.wp_map[waypoint_to][0],   self.wp_map[waypoint_to][1]
+        return np.hypot(x_from - x_to, y_from - y_to)
+
+    # --- initial state -----------------------------------------------------
+
+    def random_initial_state(self):
+        return (
+            str(np.random.choice(self.waypoints)),
+            np.random.randint(0, 2),
+            np.random.randint(0, 2),
+            np.random.randint(0, 2),
+            np.random.randint(0, 2),
+            np.random.randint(0, self.maximum_charge + 1),
+        )
+
+    # --- action selection --------------------------------------------------
+
+    def valid_action_mask(self, state):
+        """Returns boolean array: True where action is allowed from state."""
+        waypoint_current = state[0]
+        mask = np.ones(len(self.actions), dtype=bool)
+        for action_index, (action_kind, action_argument) in enumerate(self.actions):
+            if action_kind == 'move' and action_argument == waypoint_current:
+                mask[action_index] = False   # no self-loops
+        return mask
+
+    def greedy_action(self, state):
+        """Argmax over valid actions only."""
+        state_index = self.state_to_index[state]
+        q_values = self.Q[state_index].copy()
+        q_values[~self.valid_action_mask(state)] = -np.inf
+        return int(np.argmax(q_values))
+
+    def epsilon_greedy(self, state, epsilon):
+        mask = self.valid_action_mask(state)
+        if np.random.random() < epsilon:
+            valid_indices = np.where(mask)[0]
+            return int(np.random.choice(valid_indices))
+        state_index = self.state_to_index[state]
+        q_values = self.Q[state_index].copy()
+        q_values[~mask] = -np.inf
+        return int(np.argmax(q_values))
+
+    # --- MDP transition model ----------------------------------------------
+
+    def step(self, state, action_index):
+        waypoint_from, valve0, valve1, pump0, pump1, battery = state
+        action_kind, action_argument = self.actions[action_index]
+
+        reward = -1.0
+        done   = False
+
+        waypoint_next = waypoint_from
+        valve0_next, valve1_next = valve0, valve1
+        pump0_next,  pump1_next  = pump0,  pump1
+        battery_next = battery
+
+        if action_kind == 'move':
+            waypoint_to = action_argument
+            if np.random.random() >= self.p_fail:
+                waypoint_next = waypoint_to
+            distance = self.euclidean(waypoint_from, waypoint_next)
+            battery_next = max(0, battery - max(1, int(np.ceil(distance))))
+
+        elif action_kind == 'take_picture':
+            if waypoint_from == PUMP_WAYPOINT[0] and not pump0: pump0_next = 1
+            if waypoint_from == PUMP_WAYPOINT[1] and not pump1: pump1_next = 1
+            battery_next = max(0, battery - 1)
+
+        elif action_kind == 'check_valve':
+            if waypoint_from == VALVE_WAYPOINT[0] and not valve0: valve0_next = 1
+            if waypoint_from == VALVE_WAYPOINT[1] and not valve1: valve1_next = 1
+            battery_next = max(0, battery - 1)
+
+        elif action_kind == 'charge':
+            if waypoint_from in CHARGER_WAYPOINTS:
+                battery_next = self.maximum_charge
+
+        next_state = (waypoint_next, valve0_next, valve1_next,
+                      pump0_next, pump1_next, battery_next)
+
+        reward += self.gamma * self.potential(next_state) - self.potential(state)
+
+        if self.is_goal(next_state):
+            reward += 100.0
+            done = True
+        elif battery_next == 0:
+            reward -= 100.0
+            done = True
+
+        return next_state, reward, done
+
+    # --- evaluation (option C) --------------------------------------------
+
+    def evaluate_policy(self, n_rollouts=50, max_steps=60):
+        """
+        Pure greedy (no exploration) rollouts from random initial states.
+        Returns the mean episode return. Stochastic transitions are kept,
+        so this measures the learned policy's robustness to p_fail.
+        """
+        returns = np.zeros(n_rollouts)
+        for rollout in range(n_rollouts):
+            state = self.random_initial_state()
+            episode_return = 0.0
+            for _ in range(max_steps):
+                action_index = self.greedy_action(state)
+                next_state, reward, done = self.step(state, action_index)
+                episode_return += reward
+                state = next_state
+                if done:
+                    break
+            returns[rollout] = episode_return
+        return returns.mean()
+
+    # --- training ----------------------------------------------------------
+
+    def train(self,
+              n_episodes=50000, max_steps=60,
+              alpha_start=1.0, alpha_min=0.05,
+              epsilon_start=1.0, epsilon_min=0.001,
+              evaluate_every=1000, n_evaluation_rollouts=50):
+        """
+        Tabular Q-learning with epsilon-greedy exploration masked to valid
+        actions, plus periodic pure-greedy evaluation rollouts.
+
+        Returns:
+            return_history     : per-episode training return (length n_episodes)
+            evaluation_episodes: episode indices at which evaluation was run
+            evaluation_returns : mean evaluation return at each of those episodes
+        """
+        return_history      = np.zeros(n_episodes)
+        evaluation_episodes = []
+        evaluation_returns  = []
+
+        for episode in range(n_episodes):
+            alpha   = max(alpha_min,   alpha_start   * (1 - episode / n_episodes))
+            epsilon = max(epsilon_min, epsilon_start * (1 - episode / n_episodes))
+
+            state = self.random_initial_state()
+            episode_return = 0.0
+
+            for _ in range(max_steps):
+                current_index = self.state_to_index[state]
+                action_index  = self.epsilon_greedy(state, epsilon)
+                next_state, reward, done = self.step(state, action_index)
+                next_index    = self.state_to_index[next_state]
+
+                # Q-learning update (Watkins & Dayan 1992):
+                # Q[s,a] <- Q[s,a] + alpha * (r + gamma * max_a' Q[s',a'] - Q[s,a])
+                td_error = (reward
+                            + self.gamma * np.max(self.Q[next_index])
+                            - self.Q[current_index, action_index])
+                self.Q[current_index, action_index] += alpha * td_error
+
+                episode_return += reward
+                state = next_state
+                if done:
+                    break
+
+            return_history[episode] = episode_return
+
+            if evaluate_every and (episode + 1) % evaluate_every == 0:
+                mean_eval_return = self.evaluate_policy(n_rollouts=n_evaluation_rollouts)
+                evaluation_episodes.append(episode + 1)
+                evaluation_returns.append(mean_eval_return)
+                window = return_history[max(0, episode - 99):episode + 1]
+                print(f"[Q-learn] ep {episode + 1}/{n_episodes}  "
+                      f"train return (last 100) = {window.mean():7.2f}  "
+                      f"eval return = {mean_eval_return:7.2f}  "
+                      f"alpha={alpha:.3f}  eps={epsilon:.3f}")
+
+        return return_history, np.array(evaluation_episodes), np.array(evaluation_returns)
+
+    # --- plan extraction ---------------------------------------------------
+
+    def extract_plan(self, initial_state, max_steps=50):
+        plan_dicts = []
+        state      = initial_state
+        time_stamp = 0.0
+
+        saved_p_fail, self.p_fail = self.p_fail, 0.0
+        for _ in range(max_steps):
+            if self.is_goal(state):
+                break
+
+            action_index = self.greedy_action(state)
+            action_kind, action_argument = self.actions[action_index]
+            waypoint_current = state[0]
+
+            if action_kind == 'move':
+                action_name = 'move_robot'
+                action_args = ['turtlebot0', waypoint_current, action_argument]
+                duration    = self.euclidean(waypoint_current, action_argument) / 0.18
+            elif action_kind == 'take_picture':
+                action_name = 'take_picture_pump_ir'
+                action_args = ['turtlebot0', waypoint_current, 'camera0']
+                duration    = 5.0
+            elif action_kind == 'check_valve':
+                action_name = 'check_seals_valve_picture_eo'
+                action_args = ['turtlebot0', waypoint_current]
+                duration    = 5.0
+            elif action_kind == 'charge':
+                action_name = 'charge_battery'
+                action_args = ['turtlebot0', waypoint_current]
+                duration    = 5.0
+
+            plan_dicts.append({
+                'time':     time_stamp,
+                'action':   action_name,
+                'args':     action_args,
+                'duration': duration,
+            })
+            state, _, _ = self.step(state, action_index)
+            time_stamp += duration
+
+        self.p_fail = saved_p_fail
+        return plan_dicts
+    # need to change to pddl style notation as we have already implemented
+    # the way to read everything based on it from the STP-2 temporal planner
+    def _to_pddl_style(self, action_kind, action_argument, waypoint_current):
+        """
+        Map internal action tuples to the action names/args that the mission
+        dispatch loop below already expects.
+        """
+        if action_kind == 'move':
+            return 'move_robot', ['turtlebot0', waypoint_current, action_argument]
+
+        if action_kind == 'take_picture':
+            target = next((f'pump{p}' for p, wp in PUMP_WAYPOINT.items()
+                           if wp == waypoint_current), 'pump_unknown')
+            return 'take_picture_pump_ir', \
+                   ['turtlebot0', waypoint_current, 'camera0', target]
+
+        if action_kind == 'check_valve':
+            target = next((f'valve{v}' for v, wp in VALVE_WAYPOINT.items()
+                           if wp == waypoint_current), 'valve_unknown')
+            return 'check_seals_valve_picture_eo', \
+                   ['turtlebot0', waypoint_current, target]
+
+        if action_kind == 'charge':
+            return 'charge_battery', \
+                   ['turtlebot0', waypoint_current, 'charger0']
+
+        raise ValueError(f"Unknown action kind: {action_kind}")
+
+
+# ------------------------------------------------------------------
+# Convenience wrapper that mirrors run_stp_planner()'s signature idea:
+# give it the start state, get back the same list-of-dicts as parse_plan.
+# ------------------------------------------------------------------
+
+def run_qlearning_planner(initial_state,
+                          goal_waypoint,
+                          wp_map,
+                          n_episodes=20000,
+                          p_fail=0.1,
+                          gamma=0.9,
+                          plot_curve=False):
+    """
+    Train Q-learning and return a plan in parse_plan() format.
+    initial_state: (waypoint_key, valve0, valve1, pump0, pump1, battery)
+    """
+    waypoint_keys = sorted(wp_map.keys())
+    planner = QLearningPlanner(
+        waypoints     = waypoint_keys,    # was: waypoint_keys = waypoint_keys
+        wp_map        = wp_map,
+        goal_waypoint = goal_waypoint,
+        p_fail        = p_fail,
+        gamma         = gamma,
+    )
+
+    print("[Q-learn] Training...")
+    history, eval_episodes, eval_returns = planner.train(n_episodes=n_episodes)
+
+    if plot_curve:
+        import matplotlib.pyplot as plt
+        window = 100
+        smoothed = np.convolve(history,
+                               np.ones(window) / window, mode='valid')
+        plt.figure()
+        plt.plot(smoothed, label=f'Training (moving avg, window={window})')
+        plt.plot(eval_episodes, eval_returns, 'ro-', label='Eval')
+        plt.legend()
+        plt.xlabel('Episode')
+        plt.ylabel(f'Return (moving avg, window={window})')
+        plt.title('Q-learning training curve')
+        plt.grid(True)
+        plt.savefig('qlearning_training_curve.png', dpi=120)
+        plt.close()
+
+    print("[Q-learn] Extracting plan from learned policy...")
+    plan = planner.extract_plan(initial_state)
+
+    print(f"[Q-learn] Found {len(plan)} actions in plan.")
+    for action in plan:
+        print(f"  t={action['time']:.3f}: "
+              f"{action['action']} {' '.join(action['args'])}")
+
+    return plan
+
+def run_stp_planner(domain_file, problem_file):
+    venv_python    = "/home/appuser/catkin_ws/src/temporal-planning-main/bin/python2.7"
+    planner_script = "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/bin/plan.py"
+    planner_dir    = "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning"
+    plan_file      = os.path.join(planner_dir, "tmp_sas_plan.1")
+ 
+    # Mimic what 'source activate' does — prepend venv bin to PATH
+    venv_bin = "/home/appuser/catkin_ws/src/temporal-planning-main/bin"
+    env = os.environ.copy()
+    env["PATH"] = venv_bin + ":" + env["PATH"]
+    env["VIRTUAL_ENV"] = "/home/appuser/catkin_ws/src/temporal-planning-main"
+ 
+    cmd = [
+        venv_python, planner_script, "stp-2",
+        domain_file,
+        problem_file
+    ]
+ 
+    print("[Planner] Running STP planner...")
+ 
+    result = subprocess.run(
+        cmd,
+        cwd=planner_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env  # <-- pass the modified environment
+    )
+ 
+    print(result.stdout.decode())
+    if result.returncode != 0:
+        print("[Planner] Error:")
+        print(result.stderr.decode())
+        return None
+ 
+    if not os.path.exists(plan_file):
+        print("[Planner] Plan file not found — planner may have failed.")
+        return None
+ 
+    return parse_plan(plan_file)
+
+def parse_plan(plan_file):
+    """
+    Parses the tmp_sas_plan.1 file and returns a list of actions.
+    Each action is a dict with keys: time, action, args, duration
+    """
+    actions = []
+    with open(plan_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith(';'):
+                continue
+            # Format: <time>: (<action> <args>) [<duration>]
+            # Example: 0.000: (move turtlebot0 wp0 wp1 d01) [5.000]
+            try:
+                time_part, rest = line.split(':', 1)
+                action_part = rest.strip().lstrip('(').split(')')[0]
+                tokens = action_part.strip().split()
+                action_name = tokens[0]
+                action_args = tokens[1:]
+                duration = None
+                if '[' in line:
+                    duration = float(line.split('[')[1].rstrip(']'))
+                actions.append({
+                    'time':     float(time_part.strip()),
+                    'action':   action_name,
+                    'args':     action_args,
+                    'duration': duration
+                })
+            except Exception as e:
+                print(f"[Planner] Could not parse line: {line} ({e})")
+ 
+    print(f"[Planner] Found {len(actions)} actions in plan.")
+    for a in actions:
+        print(f"  t={a['time']:.3f}: {a['action']} {' '.join(a['args'])}")
+    return actions
+
+class GraphPlan(object):
+    def __init__(self, domain, problem):
+        self.independentActions = []
+        self.noGoods = []
+        self.graph = []
+
+    def graphPlan(self):
+        # initialization
+        initState = self.initialState
+
+    def extract(self, Graph, subGoals, level):
+
+        if level == 0:
+            return []
+        if subGoals in self.noGoods[level]:
+            return None
+        plan = self.gpSearch(Graph, subGoals, [], level)
+        if plan is not None:
+            return plan
+        self.noGoods[level].append([subGoals])
+        return None
+
+
+#2) GNC module (path-followig and PID controller for the robot)
+"""  Robot GNC module ----------------------------------------------------------------------
+"""
+class PID:
+    """
+    Discrete PID control
+    """
+    def __init__(self, P=0.0, I=0.0, D=0.0, Derivator=0, Integrator=0, Integrator_max=10, Integrator_min=-10):
+        self.Kp = P
+        self.Ki = I
+        self.Kd = D
+        self.Derivator = Derivator
+        self.Integrator = Integrator
+        self.Integrator_max = Integrator_max
+        self.Integrator_min = Integrator_min
+        self.set_point = 0.0
+        self.error = 0.0
+
+    def update(self, current_value):
+        PI = 3.1415926535897
+        self.error = self.set_point - current_value
+        if self.error > pi:  # specific design for circular situation
+            self.error = self.error - 2*pi
+        elif self.error < -pi:
+            self.error = self.error + 2*pi
+        self.P_value = self.Kp * self.error
+        self.D_value = self.Kd * ( self.error - self.Derivator)
+        self.Derivator = self.error
+        self.Integrator = self.Integrator + self.error
+        if self.Integrator > self.Integrator_max:
+            self.Integrator = self.Integrator_max
+        elif self.Integrator < self.Integrator_min:
+            self.Integrator = self.Integrator_min
+        self.I_value = self.Integrator * self.Ki
+        PID = self.P_value + self.I_value + self.D_value
+        return PID
+
+    def setPoint(self, set_point):
+        self.set_point = set_point
+        self.Derivator = 0
+        self.Integrator = 0
+
+    def setPID(self, set_P=0.0, set_I=0.0, set_D=0.0):
+        self.Kp = set_P
+        self.Ki = set_I
+        self.Kd = set_D
+
+class turtlebot_move():
+    """
+    Path-following module
+    """
+    def __init__(self):
+        if not rospy.core.is_initialized():
+            rospy.init_node('turtlebot_move', anonymous=False)
+
+        rospy.loginfo("Press CTRL + C to terminate")
+        rospy.on_shutdown(self.stop)
+
+        self.x = 0.0
+        self.y = 0.0
+        self.theta = 0.0
+        self.pid_theta = PID(0,0,0)  # initialization
+
+        self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_callback) # subscribing to the odometer
+        self.vel_pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)        # reading vehicle speed
+        self.vel = Twist()
+        self.rate = rospy.Rate(10)
+        self.counter = 0
+        self.trajectory = list()
+
+        # track a sequence of waypoints
+        for point in WAYPOINTS:
+            self.move_to_point(point[0], point[1])
+            rospy.sleep(1)
+        self.stop()
+        rospy.logwarn("Action done.")
+
+        # plot trajectory
+        data = np.array(self.trajectory)
+        np.savetxt('trajectory.csv', data, fmt='%f', delimiter=',')
+        plt.plot(data[:,0],data[:,1])
+        plt.show()
+
+
+    def move_to_point(self, x, y):
+        # Here must be improved the path-following ---
+        # Compute orientation for angular vel and direction vector for linear velocity
+
+        diff_x = x - self.x
+        diff_y = y - self.y
+        direction_vector = np.array([diff_x, diff_y])
+        direction_vector = direction_vector/sqrt(diff_x*diff_x + diff_y*diff_y)  # normalization
+        theta = atan2(diff_y, diff_x)
+
+        # We should adopt different parameters for different kinds of movement
+        self.pid_theta.setPID(1, 0, 0)     # P control while steering
+        self.pid_theta.setPoint(theta)
+        rospy.logwarn("### PID: set target theta = " + str(theta) + " ###")
+
+        
+        # Adjust orientation first
+        while not rospy.is_shutdown():
+            angular = self.pid_theta.update(self.theta)
+            if abs(angular) > 0.2:
+                angular = angular/abs(angular)*0.2
+            if abs(angular) < 0.01:
+                break
+            self.vel.linear.x = 0
+            self.vel.angular.z = angular
+            self.vel_pub.publish(self.vel)
+            self.rate.sleep()
+
+        # Have a rest
+        self.stop()
+        self.pid_theta.setPoint(theta)
+        self.pid_theta.setPID(1, 0.02, 0.2)  # PID control while moving
+
+        # Move to the target point
+        while not rospy.is_shutdown():
+            diff_x = x - self.x
+            diff_y = y - self.y
+            vector = np.array([diff_x, diff_y])
+            linear = np.dot(vector, direction_vector) # projection
+            if abs(linear) > 0.2:
+                linear = linear/abs(linear)*0.2
+
+            angular = self.pid_theta.update(self.theta)
+            if abs(angular) > 0.2:
+                angular = angular/abs(angular)*0.2
+
+            if abs(linear) < 0.01 and abs(angular) < 0.01:
+                break
+            self.vel.linear.x = 1.5*linear   # Here can adjust speed
+            self.vel.angular.z = angular
+            self.vel_pub.publish(self.vel)
+            self.rate.sleep()
+        self.stop()
+    def stop(self):
+        self.vel.linear.x = 0
+        self.vel.angular.z = 0
+        self.vel_pub.publish(self.vel)
+        rospy.sleep(1)
+
+    def odom_callback(self, msg):
+        # Get (x, y, theta) specification from odometry topic
+        quarternion = [msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,\
+                    msg.pose.pose.orientation.z, msg.pose.pose.orientation.w]
+        (roll, pitch, yaw) = tf.transformations.euler_from_quaternion(quarternion)
+        self.theta = yaw
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+
+        # Make messages saved and prompted in 5Hz rather than 100Hz
+        self.counter += 1
+        if self.counter == 20:
+            self.counter = 0
+            self.trajectory.append([self.x,self.y])
+            #rospy.loginfo("odom: x=" + str(self.x) + ";  y=" + str(self.y) + ";  theta=" + str(self.theta))
+
+
+
+# 3) Program here your path-finding algorithm
+""" Hybrid A-star pathfinding --------------------------------------------------------------------
+"""
+class HybridAstar:
+    """ Hybrid A* search procedure. """
+    def __init__(self, car, grid, reverse, unit_theta=pi/12, dt=1e-2, check_dubins=1):
+        self.car = car
+        self.grid = grid
+        self.reverse = reverse
+        self.unit_theta = unit_theta
+        self.dt = dt
+        self.check_dubins = check_dubins
+
+        self.start = self.car.start_pos
+        self.goal = self.car.end_pos
+
+        self.r = self.car.l / tan(self.car.max_phi)
+        self.drive_steps = int(sqrt(2)*self.grid.cell_size/self.dt) + 1
+        self.arc = self.drive_steps * self.dt
+        self.phil = [-self.car.max_phi, 0, self.car.max_phi]
+        self.ml = [1, -1]
+
+        if reverse:
+            self.comb = list(product(self.ml, self.phil))
+        else:
+            self.comb = list(product([1], self.phil))
+
+        self.dubins = DubinsPath(self.car)
+        self.astar = Astar(self.grid, self.goal[:2])
+        
+        self.w1 = 0.95 # weight for astar heuristic
+        self.w2 = 0.05 # weight for simple heuristic
+        self.w3 = 0.30 # weight for extra cost of steering angle change
+        self.w4 = 0.10 # weight for extra cost of turning
+        self.w5 = 1.00 # weight for extra cost of reversing
+
+        self.thetas = get_discretized_thetas(self.unit_theta)
+    
+    def construct_node(self, pos):
+        """ Create node for a pos. """
+
+        theta = pos[2]
+        pt = pos[:2]
+
+        theta = round_theta(theta % (2*pi), self.thetas)
+        
+        cell_id = self.grid.to_cell_id(pt)
+        grid_pos = cell_id + [theta]
+
+        node = Node(grid_pos, pos)
+
+        return node
+    
+    def simple_heuristic(self, pos):
+        """ Heuristic by Manhattan distance. """
+
+        return abs(self.goal[0]-pos[0]) + abs(self.goal[1]-pos[1])
+        
+    def astar_heuristic(self, pos):
+        """ Heuristic by standard astar. """
+
+        result = self.astar.search_path(pos[:2])
+        if result is None:
+            return self.simple_heuristic(pos[:2])
+        h1 = result * self.grid.cell_size
+        h2 = self.simple_heuristic(pos[:2])
+
+        return self.w1*h1 + self.w2*h2
+
+    def get_children(self, node, heu, extra):
+        """ Get successors from a state. """
+
+        children = []
+        for m, phi in self.comb:
+
+            # don't immediately reverse on the same arc (would retrace exact path)
+            if node.m and node.phi == phi and node.m*m == -1:
+                continue
+            if node.m and node.m == 1 and m == -1:
+                continue
+            pos = node.pos
+            branch = [m, pos[:2]]
+
+            for _ in range(self.drive_steps):
+                pos = self.car.step(pos, phi, m)
+                branch.append(pos[:2])
+
+            # check safety of route-----------------------
+            pos1 = node.pos if m == 1 else pos
+            pos2 = pos if m == 1 else node.pos
+            if phi == 0:
+                safe = self.dubins.is_straight_route_safe(pos1, pos2)
+            else:
+                d, c, r = self.car.get_params(pos1, phi)
+                safe = self.dubins.is_turning_route_safe(pos1, pos2, d, c, r)
+            # --------------------------------------------
+            
+            if not safe:
+                continue
+            
+            child = self.construct_node(pos)
+            child.phi = phi
+            child.m = m
+            child.parent = node
+            child.g = node.g + self.arc
+            child.g_ = node.g_ + self.arc
+
+            if extra:
+                # extra cost for changing steering angle
+                if phi != node.phi:
+                    child.g += self.w3 * self.arc
+                
+                # extra cost for turning
+                if phi != 0:
+                    child.g += self.w4 * self.arc
+                
+                # extra cost for reverse
+                if m == -1:
+                    child.g += self.w5 * self.arc
+
+                # extra cost for direction change (forward <-> reverse)
+                if node.m and node.m != m:
+                    child.g += self.w5 * self.arc
+
+            if heu == 0:
+                child.f = child.g + self.simple_heuristic(child.pos)
+            if heu == 1:
+                child.f = child.g + self.astar_heuristic(child.pos)
+            
+            children.append([child, branch])
+
+        return children
+    
+    def best_final_shot(self, open_, closed_, best, cost, d_route, n=10):
+        """ Search best final shot in open set. """
+
+        open_.sort(key=lambda x: x.f, reverse=False)
+
+        for t in range(min(n, len(open_))):
+            best_ = open_[t]
+            solutions_ = self.dubins.find_tangents(best_.pos, self.goal)
+            d_route_, cost_, valid_ = self.dubins.best_tangent(solutions_)
+        
+            if valid_ and cost_ + best_.g_ < cost + best.g_:
+                best = best_
+                cost = cost_
+                d_route = d_route_
+        
+        if best in open_:
+            open_.remove(best)
+            closed_.append(best)
+        
+        return best, cost, d_route
+    
+    def backtracking(self, node):
+        """ Backtracking the path. """
+
+        route = []
+        while node.parent:
+            route.append((node.pos, node.phi, node.m))
+            node = node.parent
+        
+        return list(reversed(route))
+    
+    def search_path(self, heu=1, extra=False):
+        """ Hybrid A* pathfinding. """
+
+        root = self.construct_node(self.start)
+        root.g = float(0)
+        root.g_ = float(0)
+        
+        if heu == 0:
+            root.f = root.g + self.simple_heuristic(root.pos)
+        if heu == 1:
+            root.f = root.g + self.astar_heuristic(root.pos)
+
+        closed_ = []
+        open_ = [root]
+
+        goal_node = self.construct_node(self.goal)
+
+        count = 0
+        while open_:
+            count += 1
+            best = min(open_, key=lambda x: x.f)
+
+            open_.remove(best)
+            closed_.append(best)
+
+            # check if A* expansion reached the goal cell directly
+            if best.grid_pos == goal_node.grid_pos:
+                route = self.backtracking(best)
+                path = self.car.get_path(self.start, route)
+                cost = best.g_
+                print('Path found (direct): {}'.format(round(cost, 2)))
+                print('Total iteration:', count)
+                return path, closed_
+
+            # check dubins path
+            if count % self.check_dubins == 0:
+                solutions = self.dubins.find_tangents(best.pos, self.goal)
+                d_route, cost, valid = self.dubins.best_tangent(solutions)
+
+                if valid:
+                    best, cost, d_route = self.best_final_shot(open_, closed_, best, cost, d_route)
+                    route = self.backtracking(best) + d_route
+                    path = self.car.get_path(self.start, route)
+                    cost += best.g_
+                    print('Shortest path (Dubins): {}'.format(round(cost, 2)))
+                    print('Total iteration:', count)
+
+                    return path, closed_
+
+            children = self.get_children(best, heu, extra)
+
+            for child, branch in children:
+
+                if child in closed_:
+                    continue
+
+                if child not in open_:
+                    best.branches.append(branch)
+                    open_.append(child)
+
+                elif child.g < open_[open_.index(child)].g:
+                    best.branches.append(branch)
+
+                    c = open_[open_.index(child)]
+                    p = c.parent
+                    for b in p.branches:
+                        if same_point(b[-1], c.pos[:2]):
+                            p.branches.remove(b)
+                            break
+                    
+                    open_.remove(child)
+                    open_.append(child)
+
+        return None, closed_
+
+
+def plot_search_space(env, car, grid, closed_, grid_on):
+    """ Plot explored search space when no valid path was found. """
+
+    branches = []
+    bcolors = []
+    for node in closed_:
+        for b in node.branches:
+            branches.append(b[1:])
+            bcolors.append('y' if b[0] == 1 else 'b')
+
+    all_x = [ob.x + ob.w for ob in env.obs] + [0]
+    all_y = [ob.y + ob.h for ob in env.obs] + [0]
+    room_w = max(all_x) + 0.3
+    room_h = max(all_y) + 0.3
+
+    fig, ax = plt.subplots(figsize=(max(6, 6*room_w/room_h), 6))
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_h)
+    ax.set_aspect("equal")
+    ax.set_title("No valid path found — explored search space", color='red')
+
+    if grid_on:
+        ax.set_xticks(np.arange(0, room_w, grid.cell_size))
+        ax.set_yticks(np.arange(0, room_h, grid.cell_size))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.tick_params(length=0)
+        plt.grid(which='both')
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ob in env.obs:
+        ax.add_patch(Rectangle((ob.x, ob.y), ob.w, ob.h, fc='gray', ec='k'))
+
+    start_state = car.get_car_state(car.start_pos)
+    end_state   = car.get_car_state(car.end_pos)
+    ax = plot_a_car(ax, end_state.model)
+    ax = plot_a_car(ax, start_state.model)
+    ax.plot(car.start_pos[0], car.start_pos[1], 'ro', markersize=6)
+    ax.plot(car.end_pos[0],   car.end_pos[1],   'rx', markersize=8, markeredgewidth=2)
+
+    if branches:
+        lc = LineCollection(branches, linewidth=0.6, colors=bcolors, alpha=0.7)
+        ax.add_collection(lc)
+
+    # mark every explored node position
+    xs = [n.pos[0] for n in closed_]
+    ys = [n.pos[1] for n in closed_]
+    ax.scatter(xs, ys, s=4, c='cyan', zorder=3, label=f'explored ({len(closed_)} nodes)')
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def main_hybrid_a(heu,start_pos, end_pos,reverse, extra, grid_on):
+
+    tc = map_grid()
+    env = Environment(tc.obs)
+    car = SimpleCar(env, start_pos, end_pos, l=0.19)
+    grid = Grid(env)
+
+    hastar = HybridAstar(car, grid, reverse)
+
+    t = time.time()
+    path, closed_ = hastar.search_path(heu, extra)
+    print('Total time: {}s'.format(round(time.time()-t, 3)))
+
+    if not path:
+        print('No valid path!')
+        if closed_:
+            print('Plotting explored search space ({} nodes)...'.format(len(closed_)))
+            plot_search_space(env, car, grid, closed_, grid_on)
+        return
+    # a post-processing is required to have path list
+    path = path[::5] + [path[-1]]
+    branches = []
+    bcolors = []
+    for node in closed_:
+        for b in node.branches:
+            branches.append(b[1:])
+            bcolors.append('y' if b[0] == 1 else 'b')
+
+    xl, yl = [], []
+    xl_np1,yl_np1=[],[]
+    carl = []
+    dt_s=int(25)  # samples for gazebo simulator
+    for i in range(len(path)):
+        xl.append(path[i].pos[0])
+        yl.append(path[i].pos[1])
+        carl.append(path[i].model[0])
+        if i==0 or i==len(path):
+            xl_np1.append(path[i].pos[0])
+            yl_np1.append(path[i].pos[1])            
+        elif dt_s*i<len(path):
+            xl_np1.append(path[i*dt_s].pos[0])
+            yl_np1.append(path[i*dt_s].pos[1])      
+    # defining way-points
+    xl_np=np.array(xl_np1)
+    xl_np=xl_np
+    yl_np=np.array(yl_np1)
+    yl_np=yl_np
+    global WAYPOINTS
+    WAYPOINTS=np.column_stack([xl_np,yl_np])
+    #print(WAYPOINTS)
+    
+    start_state = car.get_car_state(car.start_pos)
+    end_state = car.get_car_state(car.end_pos)
+
+    # plot and annimation
+    # Compute actual room bounds from obstacles with a small margin
+    all_x = [ob.x + ob.w for ob in env.obs] + [0]
+    all_y = [ob.y + ob.h for ob in env.obs] + [0]
+    room_w = max(all_x) + 0.3
+    room_h = max(all_y) + 0.3
+    fig, ax = plt.subplots(figsize=(max(6, 6*room_w/room_h), 6))
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_h)
+    ax.set_aspect("equal")
+
+    if grid_on:
+        ax.set_xticks(np.arange(0, room_w, grid.cell_size))
+        ax.set_yticks(np.arange(0, room_h, grid.cell_size))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.tick_params(length=0)
+        plt.grid(which='both')
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    
+    for ob in env.obs:
+        ax.add_patch(Rectangle((ob.x, ob.y), ob.w, ob.h, fc='gray', ec='k'))
+    
+    ax.plot(car.start_pos[0], car.start_pos[1], 'ro', markersize=6)
+    ax = plot_a_car(ax, end_state.model)
+    ax = plot_a_car(ax, start_state.model)
+
+    _branches = LineCollection([], linewidth=1)
+    ax.add_collection(_branches)
+
+    _path, = ax.plot([], [], color='lime', linewidth=2)
+    _carl = PatchCollection([])
+    ax.add_collection(_carl)
+    _path1, = ax.plot([], [], color='w', linewidth=2)
+    _car = PatchCollection([])
+    ax.add_collection(_car)
+    
+    frames = len(branches) + len(path) + 1
+
+    def init():
+        _branches.set_paths([])
+        _path.set_data([], [])
+        _carl.set_paths([])
+        _path1.set_data([], [])
+        _car.set_paths([])
+
+        return _branches, _path, _carl, _path1, _car
+
+    def animate(i):
+
+        edgecolor = ['k']*5 + ['r']
+        facecolor = ['y'] + ['k']*4 + ['r']
+
+        if i < len(branches):
+            _branches.set_paths(branches[:i+1])
+            _branches.set_color(bcolors)
+        
+        else:
+            _branches.set_paths(branches)
+
+            j = i - len(branches)
+
+            _path.set_data(xl[min(j, len(path)-1):], yl[min(j, len(path)-1):])
+
+            sub_carl = carl[:min(j+1, len(path))]
+            _carl.set_paths(sub_carl[::4])
+            _carl.set_edgecolor('k')
+            _carl.set_facecolor('m')
+            _carl.set_alpha(0.1)
+            _carl.set_zorder(3)
+
+            _path1.set_data(xl[:min(j+1, len(path))], yl[:min(j+1, len(path))])
+            _path1.set_zorder(3)
+
+            _car.set_paths(path[min(j, len(path)-1)].model)
+            _car.set_edgecolor(edgecolor)
+            _car.set_facecolor(facecolor)
+            _car.set_zorder(3)
+
+        return _branches, _path, _carl, _path1, _car
+
+    ani = animation.FuncAnimation(fig, animate, init_func=init, frames=frames,
+                                  interval=1, repeat=True, blit=True)
+
+    plt.show()
+
+class Node:
+    """ Hybrid A* tree node. """
+
+    def __init__(self, grid_pos, pos):
+
+        self.grid_pos = grid_pos
+        self.pos = pos
+        self.g = None
+        self.g_ = None
+        self.f = None
+        self.parent = None
+        self.phi = 0
+        self.m = None
+        self.branches = []
+
+    def __eq__(self, other):
+
+        return self.grid_pos == other.grid_pos
+    
+    def __hash__(self):
+
+        return hash((self.grid_pos))
+    
+class map_grid:
+    """ Here the obstacles are defined for a 20x20 map. """
+    def __init__(self):
+
+        self.start_pos2 = [4, 4, 0]  # default values
+        self.end_pos2 = [4, 8, -pi]  # default
+        self.obs = [
+            #x,y,x-bredde,y-høyde
+        
+            [0.0, 0.0,   3.3,  0.05],
+            [3.275, 0.0, 0.05, 0.2],
+            [3.3, 0.175, 1.91, 0.05],
+            [0.0, 2.725, 5.21, 0.05],
+            [0.0, 0.0,   0.05, 1.0],
+            [0.0, 0.975, 0.5,  0.05],
+            [0.475, 1.0, 0.05, 0.2],
+            [0.0, 1.175, 0.5,  0.05],
+            [0.0, 1.2,   0.05, 1.55],
+            [5.185, 0.2, 0.05, 2.55],
+            [1.2, 1.65, 0.2, 0.4],
+            [2.3, 1.65, 0.4, 0.4],
+            [3.66, 1.8, 0.4, 0.2],
+            [1.35, 0.6, 0.5, 0.2],
+            [3.16, 0.8, 0.5, 0.2],
+        ]
+
+
+#4) Program here the turtlebot actions (based in your AI planner)
+"""
+Turtlebot 3 actions-------------------------------------------------------------------------
+"""
+
+class TakePhoto:
+    def __init__(self):
+
+        self.bridge = CvBridge()
+        self.image_received = False
+
+        # Connect image topic
+        img_topic = "/camera/rgb/image_raw"
+        self.image_sub = rospy.Subscriber(img_topic, Image, self.callback)
+
+        # Allow up to one second to connection
+        rospy.sleep(1)
+
+    def callback(self, data):
+
+        # Convert image to OpenCV format
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+        except CvBridgeError as e:
+            print(e)
+
+        self.image_received = True
+        self.image = cv_image
+
+    def take_picture(self, img_title):
+        if self.image_received:
+            # Save an image
+            cv2.imwrite(img_title, self.image)
+            return True
+        else:
+            return False
+        
+def taking_photo_exe():
+    # Initialize
+    camera = TakePhoto()
+
+    # Default value is 'photo.jpg'
+    now = datetime.now()
+    dt_string = now.strftime("%d%m%Y_%H%M%S")
+    img_title = rospy.get_param('~image_title', 'photo'+dt_string+'.jpg')
+
+    if camera.take_picture(img_title):
+        rospy.loginfo("Saved image " + img_title)
+    else:
+        rospy.loginfo("No images received")
+	#eog photo.jpg
+    # Sleep to give the last log messages time to be sent
+
+	# saving photo in a desired directory
+    file_source = '/home/miguel/catkin_ws/'
+    file_destination = '/home/miguel/catkin_ws/src/assigment4_ttk4192/scripts'
+    g='photo'+dt_string+'.jpg'
+
+    shutil.move(file_source + g, file_destination)
+    rospy.sleep(1)
+
+class TB3Manipulator:
+    def __init__(self):
+        moveit_commander.roscpp_initialize(sys.argv)
+        self.arm = moveit_commander.MoveGroupCommander("arm")
+        self.gripper = moveit_commander.MoveGroupCommander("gripper")
+
+        self.arm.set_max_velocity_scaling_factor(0.3)
+        self.arm.set_max_acceleration_scaling_factor(0.3)
+        self.gripper.set_max_velocity_scaling_factor(1.0)
+        self.gripper.set_max_acceleration_scaling_factor(1.0)
+
+    def arm_home(self):
+        self.arm.set_named_target("home")
+        ok = self.arm.go(wait=True)
+        self.arm.stop()
+        self.arm.clear_pose_targets()
+        return ok
+
+    def set_gripper(self, value):
+        rospy.loginfo(f"Setting gripper joint to {value}")
+
+        # only target the ACTIVE joint
+        self.gripper.set_joint_value_target({"gripper": value})
+
+        ok = self.gripper.go(wait=True)
+        self.gripper.stop()
+        self.gripper.clear_pose_targets()
+
+        rospy.loginfo(f"Gripper result: {ok}")
+        rospy.loginfo(f"Current gripper values: {self.gripper.get_current_joint_values()}")
+        return ok
+
+    # def open_gripper(self):
+    #     return self.set_gripper(0.01)
+
+    # def close_gripper(self):
+    #     return self.set_gripper(-0.01)
+
+    def open_gripper(self):
+        self.gripper.set_joint_value_target({"gripper": 0.010})
+        self.gripper.go(wait=True)
+        self.gripper.stop()
+
+    def close_gripper(self):
+        self.gripper.set_joint_value_target({"gripper": -0.010})
+        self.gripper.go(wait=True)
+        self.gripper.stop()
+
+def use_gripper_exe():
+    manip = TB3Manipulator()
+
+    rospy.loginfo("Moving arm to home")
+    manip.arm_home()
+    rospy.sleep(1)
+
+    rospy.loginfo("Opening gripper")
+    manip.open_gripper()
+    rospy.sleep(1)
+
+    rospy.loginfo("Closing gripper")
+    manip.close_gripper()
+    rospy.sleep(1)
+
+#Think this is good, needs testing
+def move_robot_waypoint0_waypoint1(start_pos, end_pos):
+    # This function executes Move Robot from 1 to 2
+    # This function uses hybrid A-star
+    a=0
+    while a<3:
+        print("Excuting Mr12")
+        time.sleep(1)
+        a=a+1
+    print("Computing hybrid A* path")
+
+    if not rospy.core.is_initialized():
+        rospy.init_node('mission_planner', anonymous=False)
+
+    # Read current pose from /odom so planning starts from where the robot is now.
+    try:
+        odom_msg = rospy.wait_for_message("/odom", Odometry, timeout=2.0)
+        q = [
+            odom_msg.pose.pose.orientation.x,
+            odom_msg.pose.pose.orientation.y,
+            odom_msg.pose.pose.orientation.z,
+            odom_msg.pose.pose.orientation.w,
+        ]
+        (_, _, yaw) = tf.transformations.euler_from_quaternion(q)
+        start_pos = [
+            odom_msg.pose.pose.position.x,
+            odom_msg.pose.pose.position.y,
+            yaw,
+        ]
+        rospy.loginfo(f"Using /odom start pose: {start_pos}")
+    except rospy.ROSException:
+        rospy.logwarn("No /odom received within 2s. Falling back to planner start waypoint.")
+
+    p = argparse.ArgumentParser()
+    p.add_argument('-heu', type=int, default=1, help='heuristic type')
+    p.add_argument('-r', action='store_true', help='allow reverse or not')
+    p.add_argument('-e', action='store_true', help='add extra cost or not')
+    p.add_argument('-g', action='store_true', help='show grid or not')
+    args, _ = p.parse_known_args()
+    main_hybrid_a(args.heu,start_pos,end_pos,True,args.e,args.g)
+    print("Executing path following")
+    turtlebot_move()
+    
+
+
+#Not done
+def Manipulate_OpenManipulator_x():
+    print("Executing manipulate a weight")
+    time.sleep(5)
+
+def making_turn_exe():
+    print("Executing Make a turn")
+    time.sleep(1)
+    #Starts a new node
+    #rospy.init_node('turtlebot_move', anonymous=True)
+    velocity_publisher = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+    vel_msg = Twist()
+
+    # Receiveing the user's input
+    print("Let's rotate your robot")
+    #speed = input("Input your speed (degrees/sec):")
+    #angle = input("Type your distance (degrees):")
+    #clockwise = input("Clockwise?: ") #True or false
+
+    speed = 5
+    angle = 180
+    clockwise = True
+
+    #Converting from angles to radians
+    angular_speed = speed*2*pi/360
+    relative_angle = angle*2*pi/360
+
+    #We wont use linear components
+    vel_msg.linear.x=0
+    vel_msg.linear.y=0
+    vel_msg.linear.z=0
+    vel_msg.angular.x = 0
+    vel_msg.angular.y = 0
+
+    # Checking if our movement is CW or CCW
+    if clockwise:
+        vel_msg.angular.z = -abs(angular_speed)
+    else:
+        vel_msg.angular.z = abs(angular_speed)
+    # Setting the current time for distance calculus
+    t0 = rospy.Time.now().to_sec()
+    current_angle = 0   #should be from the odometer
+
+    while(current_angle < relative_angle):
+        velocity_publisher.publish(vel_msg)
+        t1 = rospy.Time.now().to_sec()
+        current_angle = angular_speed*(t1-t0)
+
+    #Forcing our robot to stop
+    vel_msg.angular.z = 0
+    velocity_publisher.publish(vel_msg)
+    #rospy.spin()
+
+#There are no Ir-topic as far as I can see, so it should be the same as take photo
+def check_pump_picture_ir_waypoint0():
+    a=0
+    while a<3:
+        print("Taking IR picture at waypoint0 ...")
+        time.sleep(1)
+        a=a+1
+    taking_photo_exe()
+    time.sleep(5)
+
+#Think this is good.
+def check_seals_valve_picture_eo(WP):
+    a=0
+    while a<3:
+        print(f"Taking EO picture at {WP} ...")
+        time.sleep(1)
+        a=a+1
+    taking_photo_exe()
+    time.sleep(5)
+
+# Charging battery, dont know if we need to subscribe to topics here.
+def charge_battery_waypoint0():
+    print("chargin battery")
+    time.sleep(5)
+
+
+# 5) Program here the main commands of your mission planner code
+""" Main code ---------------------------------------------------------------------------
+"""
+if __name__ == '__main__':
+    try:
+        print()
+        print("************ TTK4192 - Assigment 4 **************************")
+        print()
+        print("AI planners: GraphPlan")
+        print("Path-finding: Hybrid A-star")
+        print("GNC Controller: PID path-following")
+        print("Robot: Turtlebot3 waffle-pi")
+        print("date: 20.03.23")
+        print()
+        print("**************************************************************")
+        print()
+ 
+        # WAYPOINTS = [[1.99,2.45],[2.99,2.45],]
+        # turtlebot_move()
+        # check_seals_valve_picture_eo(1)
+        # use_gripper_exe()
+
+        # plan = run_stp_planner("/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/domains/ttk4192/domain/PDDL_domain_1_improved.pddl",
+        #                  "/home/appuser/catkin_ws/src/temporal-planning-main/temporal-planning/domains/ttk4192/problem/PDDL_problem_1.pddl")
+
+        # Table 4: start at wp0, goal wp4, all predicates initially False, full battery.
+        initial_state = ('waypoint0', 0, 0, 0, 0, 10)
+
+        plan = run_qlearning_planner(
+            initial_state = initial_state,
+            goal_waypoint = 'waypoint0',
+            wp_map        = WP_MAP,
+            n_episodes    = 50000,
+            p_fail        = 0.05,
+            gamma         = 0.95,
+            plot_curve    = True,
+        )
+ 
+        if plan:
+            print("\n[Planner] Plan summary:")
+            for step, a in enumerate(plan, 1):
+                print(f"  {step}: {a['action']} {' '.join(a['args'])}")
+
+        # 5.3) Start mission execution
+        print("")
+        print("Starting mission execution")
+        
+        # Start simulations with battery = 100%
+        battery = 100
+        task_finished = 0
+        task_total = len(plan)
+        i_ini = 0
+
+        while i_ini < task_total:
+            action = plan[i_ini]
+            action_name = action['action']
+            action_args = action['args']
+
+            print(f"\n[Mission] Step {i_ini+1}/{task_total}: {action_name} {' '.join(action_args)}")
+
+            if action_name == "move_robot":
+                # args: [robot, from_wp, to_wp, route]
+                from_wp = action_args[1]
+                to_wp   = action_args[2]
+                print(f"[Mission] Moving robot from {from_wp} to {to_wp}")
+                move_robot_waypoint0_waypoint1(WP_MAP[from_wp],WP_MAP[to_wp])  # replace with your move function
+                # WAYPOINTS=[WP_MAP[from_wp],WP_MAP[to_wp]]
+                # turtlebot_move()
+                time.sleep(1)
+
+            elif action_name == "take_picture_pump_ir":
+                # args: [robot, waypoint, camera,  pump]
+                waypoint = action_args[1] if len(action_args) > 1 else "unknown"
+                target   = action_args[3] if len(action_args) > 2 else "unknown"
+                print(f"[Mission] Inspecting pump at {waypoint} — target: {target}")
+                # taking_photo_exe()  # uncomment when ready
+                time.sleep(1)
+
+            elif action_name == "check_seals_valve_picture_eo":
+                # args: [robot, waypoint, camera, valve]
+                waypoint = action_args[1] if len(action_args) > 1 else "unknown"
+                target   = action_args[2] if len(action_args) > 2 else "unknown"
+                print(f"[Mission] Checking valve EO at {waypoint} — target: {target}")
+                # taking_photo_exe()  # uncomment when ready
+                time.sleep(1)
+
+
+            elif action_name == "charge_battery":
+                # args: [robot, charger_wp, charger]
+                print(f"[Mission] Charging battery...")
+                battery = 100
+                time.sleep(1)
+
+            else:
+                print(f"[Mission] Unknown action: {action_name} — skipping")
+
+            task_finished += 1
+            # battery -= 5  # rough battery drain per action
+            print(f"[Mission] Battery: {battery}%")
+
+            i_ini += 1  # next task
+
+        print("")
+        print("--------------------------------------")
+        print(f"All {task_finished} tasks were performed successfully")
+        time.sleep(10)
+
+
+
+
+        
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Action terminated.")
